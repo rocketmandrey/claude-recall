@@ -4,7 +4,7 @@
 
 ![Claude Code](https://img.shields.io/badge/Claude_Code-skill+CLI-orange?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)
-![Version](https://img.shields.io/badge/version-0.3.2-blue?style=flat-square)
+![Version](https://img.shields.io/badge/version-0.4.0-blue?style=flat-square)
 ![Zero deps](https://img.shields.io/badge/dependencies-0-blue?style=flat-square)
 ![macOS](https://img.shields.io/badge/platform-macOS-lightgrey?style=flat-square)
 
@@ -53,6 +53,14 @@ next: null
 
 When several sessions match, the orchestrator doesn't guess — it shows a selector
 (project folder + date + task context per candidate, plus a "dig deeper" option).
+
+## Sessions name themselves
+
+Every recap (and every handoff, if the loop is on) also titles the session
+**`folder/project · task`** — via the exact mechanism `/rename` uses — so the
+`claude --resume` picker stops being a wall of "no name". The title refreshes as
+the task evolves. Names you set by hand are never overwritten; set one explicitly
+with `recall rename <id8> <title>`; disable with `RECALL_AUTONAME=0`.
 
 ## Installation
 
@@ -135,6 +143,7 @@ claude-recall/
 | `recall cmd <id8>` | print the resume command (handoff) |
 | `recall open <id8>` | open the session in a new terminal window (spawn) |
 | `recall remove <id8>` | forget a session: card + index line + tombstone |
+| `recall rename <id8> <title...>` | set a session's display name by hand (auto-naming then leaves it alone) |
 | `recall handoff <file.jsonl>` | write a handoff card (in-flight state) for a session |
 | `recall backfill` | index existing sessions `[--days N] [--min-events N] [--jobs N]` |
 | `recall index` | index stats |
@@ -142,7 +151,8 @@ claude-recall/
 
 Env: `RECALL_DATA` (default `~/.claude/session-recaps`), `RECALL_MODEL` (default haiku),
 `RECALL_TERMINAL` (`Terminal`\|`iTerm`), `RECALL_MIN_EVENTS` (default 15),
-`RECALL_HANDOFF_DAYS` (default 30 — handoff retention).
+`RECALL_HANDOFF_DAYS` (default 30 — handoff retention),
+`RECALL_AUTONAME` (default 1 — auto-title sessions; `0` to disable).
 
 ## Requirements & notes
 

@@ -46,6 +46,13 @@ next: null
 匹配到多个会话时，编排器不会瞎猜——它会显示一个选择器（每个候选：项目文件夹 + 日期 +
 任务上下文，外加"深入挖掘"选项）。
 
+## 会话自动命名
+
+每次 recap（以及每次 handoff，如循环已启用）都会顺带给会话命名为
+**`文件夹/项目 · 任务`**——使用与 `/rename` 完全相同的机制——让 `claude --resume`
+选择器不再是一片 "no name"。标题随任务演进自动刷新。手动设置的名称绝不会被覆盖；
+显式命名：`recall rename <id8> <标题>`；关闭：`RECALL_AUTONAME=0`。
+
 ## 安装
 
 在 Claude Code 中粘贴：
@@ -112,6 +119,7 @@ claude-recall/
 | `recall cmd <id8>` | 打印恢复命令（handoff） |
 | `recall open <id8>` | 在新终端窗口打开会话（spawn） |
 | `recall remove <id8>` | 遗忘会话：卡片 + 索引行 + 墓碑标记 |
+| `recall rename <id8> <标题...>` | 手动设置会话显示名（自动命名不再触碰它） |
 | `recall handoff <file.jsonl>` | 为会话写入 handoff 卡片（进行中状态） |
 | `recall backfill` | 索引现有会话 `[--days N] [--min-events N] [--jobs N]` |
 | `recall index` | 索引统计 |
@@ -119,7 +127,8 @@ claude-recall/
 
 环境变量：`RECALL_DATA`（默认 `~/.claude/session-recaps`）、`RECALL_MODEL`（默认
 haiku）、`RECALL_TERMINAL`（`Terminal`\|`iTerm`）、`RECALL_MIN_EVENTS`（默认 15）、
-`RECALL_HANDOFF_DAYS`（默认 30 —— handoff 保留期）。
+`RECALL_HANDOFF_DAYS`（默认 30 —— handoff 保留期）、
+`RECALL_AUTONAME`（默认 1 —— 会话自动命名；设 `0` 关闭）。
 
 ## 要求与说明
 

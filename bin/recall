@@ -23,7 +23,7 @@ import re
 import subprocess
 import sys
 
-VERSION = "0.3.2"
+VERSION = "0.4.0"
 DATA = os.environ.get("RECALL_DATA", os.path.expanduser("~/.claude/session-recaps"))
 MODEL = os.environ.get("RECALL_MODEL", "claude-haiku-4-5-20251001")
 MIN_EVENTS = int(os.environ.get("RECALL_MIN_EVENTS", "15"))
@@ -33,6 +33,9 @@ LOG = "/tmp/recall.log"
 REMOVED = os.path.join(DATA, ".removed")  # id8 per line; recap/backfill skip these
 HANDOFFS = os.path.join(DATA, "handoffs")
 HANDOFF_DAYS = int(os.environ.get("RECALL_HANDOFF_DAYS", "30"))
+AUTONAMED = os.path.join(DATA, ".autonamed")  # id8 per line; titles we set (manual ones are sacred)
+AUTONAME = os.environ.get("RECALL_AUTONAME", "1") != "0"
+SESSIONS_DIR = os.path.expanduser("~/.claude/sessions")
 
 # fallback dirs only — appended, so the user's PATH order always wins
 for d in ("~/.npm-global/bin", "/opt/homebrew/bin", "/usr/local/bin", "~/.local/bin"):
@@ -181,11 +184,76 @@ def cmd_recap(transcript, force=False):
         print(f"skip {session_id[:8]} (empty or recap-worker session)")
         return
     yaml_text = call_llm(build_digest(t))
+    if AUTONAME:  # title BEFORE the card: keeps card mtime >= transcript mtime
+        m = re.search(r"^task:\s*(.+)$", yaml_text, re.M)
+        if m:
+            apply_title(transcript, session_title(t["cwd"], m.group(1)))
     with open(card_path, "w", encoding="utf-8") as f:
         f.write(f"---\nid: {session_id}\nproject: {t['cwd']}\ndates: {t['first_ts']} -> {t['last_ts']}\n"
                 f"messages: {t['n']}\n{yaml_text}\n---\n")
     update_index(session_id, index_line(session_id, t, yaml_text))
     print(f"ok {session_id[:8]}")
+
+
+# ── auto-naming (sessions title themselves: папка/проект · задача) ─────
+
+def autonamed_ids():
+    if not os.path.exists(AUTONAMED):
+        return set()
+    return {l.strip()[:8] for l in open(AUTONAMED, encoding="utf-8") if l.strip()}
+
+
+def session_title(cwd, task):
+    loc, home = cwd or "?", os.path.expanduser("~")
+    if loc.startswith(home):
+        loc = loc[len(home):].lstrip("/") or "~"
+    parts = [p for p in loc.split("/") if p]
+    for k in (3, 2, 1):  # папка/проект/подпапка — as much as stays short
+        loc = "/".join(parts[-k:])
+        if len(loc) <= 34:
+            break
+    title = f"{loc} · {' '.join(task.split())}"
+    return title if len(title) <= 80 else title[:79].rsplit(" ", 1)[0] + "…"
+
+
+def apply_title(transcript, title, manual=False):
+    """Rename a session the way /rename does: append custom-title + agent-name
+    records to its transcript, sync the live-session registry if it's running."""
+    session_id = os.path.basename(transcript).replace(".jsonl", "")
+    if not manual:  # a title the user set by hand is never overwritten
+        has_title = subprocess.run(["grep", "-q", '"type":"custom-title"', transcript],
+                                   capture_output=True).returncode == 0
+        if has_title and session_id[:8] not in autonamed_ids():
+            return
+    with open(transcript, "a", encoding="utf-8") as f:
+        for typ, key in (("custom-title", "customTitle"), ("agent-name", "agentName")):
+            f.write(json.dumps({"type": typ, key: title, "sessionId": session_id},
+                               ensure_ascii=False) + "\n")
+    for p in glob.glob(os.path.join(SESSIONS_DIR, "*.json")):
+        try:
+            d = json.load(open(p, encoding="utf-8"))
+            if d.get("sessionId") == session_id:
+                d["name"] = title
+                json.dump(d, open(p, "w", encoding="utf-8"), ensure_ascii=False)
+        except Exception:
+            continue
+    with open(AUTONAMED, "a+", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.seek(0)
+        marks = {l.strip()[:8] for l in f.read().splitlines() if l.strip()}
+        (marks.discard if manual else marks.add)(session_id[:8])
+        f.seek(0)
+        f.truncate()
+        f.write("\n".join(sorted(marks)) + ("\n" if marks else ""))
+    print(f"title {session_id[:8]} -> {title}")
+
+
+def find_transcript(id_prefix):
+    full_id = card_meta(resolve_card(id_prefix))["id"]
+    hits = glob.glob(os.path.join(PROJECTS_DIR, "*", f"{full_id}.jsonl"))
+    if not hits:
+        sys.exit(f"recall: no transcript on disk for {full_id}")
+    return hits[0]
 
 
 # ── handoff layer (continuity across compaction / resume) ──────────────
@@ -208,6 +276,10 @@ def cmd_handoff(transcript):
 Session digest:
 {build_digest(t, tail=True)}"""
     text = run_claude(prompt)
+    if AUTONAME:  # the task evolves — refresh the session's title at each compact
+        m = re.search(r"\*\*Task now:\*\*\s*(.+)", text)
+        if m:
+            apply_title(transcript, session_title(t["cwd"], m.group(1)))
     path = os.path.join(HANDOFFS, f"{session_id}.md")
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"# Session handoff (auto-written before last compact / at session end)\n"
@@ -463,6 +535,7 @@ USAGE = """recall {VERSION} — session memory & orchestration for Claude Code
   recall cmd <id8>              print the resume command (handoff mode)
   recall open <id8>             open the session in a new terminal window (spawn mode)
   recall remove <id8>           forget a session: card + index line + tombstone
+  recall rename <id8> <title>   set a session's display name by hand (auto-naming then leaves it alone)
   recall recap <file.jsonl>     recap one transcript [--force] (--force also un-removes)
   recall handoff <file.jsonl>   write a handoff card (in-flight state) for a session
   recall backfill               recap existing sessions [--days N] [--min-events N] [--jobs N]
@@ -473,7 +546,8 @@ USAGE = """recall {VERSION} — session memory & orchestration for Claude Code
   recall doctor                 check installation
 
 env: RECALL_DATA, RECALL_MODEL, RECALL_TERMINAL (Terminal|iTerm), RECALL_MIN_EVENTS,
-     RECALL_HANDOFF_DAYS (default 30 — handoff retention)"""
+     RECALL_HANDOFF_DAYS (default 30 — handoff retention),
+     RECALL_AUTONAME (1 — auto-title sessions as папка/проект · задача; 0 to disable)"""
 
 
 def main():
@@ -494,6 +568,8 @@ def main():
         cmd_open(args[1])
     elif args[0] in ("remove", "rm", "forget") and len(args) > 1:
         cmd_remove(args[1])
+    elif args[0] == "rename" and len(args) > 2:
+        apply_title(find_transcript(args[1]), " ".join(args[2:]), manual=True)
     elif args[0] == "recap" and len(args) > 1:
         cmd_recap(args[1], force="--force" in args)
     elif args[0] == "backfill":

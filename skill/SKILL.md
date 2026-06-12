@@ -99,6 +99,10 @@ SessionEnd-хук (`recall hook` в `~/.claude/settings.json`) рекапит к
 `recall doctor` (проверяет и permissions: установщик прописывает `Bash(recall *)`
 в allow — recall работает в любой сессии без промптов).
 
+Заодно сессии **называют себя сами**: каждый recap/handoff даёт сессии имя
+`папка/проект · задача` (механизмом `/rename`) — пикер `claude --resume` читаем.
+Ручные имена не перезаписываются; «назови ту сессию X» → `recall rename <id8> X`.
+
 ## Handoff-слой (непрерывность; опционален)
 
 Петля включается при установке (`./install.sh --with-handoff`; `recall doctor`
