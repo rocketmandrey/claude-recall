@@ -1,13 +1,16 @@
 ---
 name: session-orchestrator
 description: >-
-  Оркестратор «проект → чат → задача» поверх recall (индекс всех сессий Claude Code).
-  Находит прошлую сессию по описанию задачи, погружается в неё (контекст, проект, скилл,
-  артефакты) и действует одним из трёх режимов: доделать здесь, дать команду resume,
-  или самому открыть сессию в новом окне терминала. Используй когда: «найди сессию где
-  я делал X», «в каком чате мы делали Y», «мы же это уже делали», «сделай ещё раз как
-  тогда», «восстанови проект Z», «продолжи ту сессию про…», «открой сессию про…»,
-  «что мы решили насчёт…» (ответ лежит в прошлой сессии).
+  Session orchestrator on top of the recall index of all Claude Code sessions:
+  finds a past session by task description, dives in (context, project, skill,
+  artifacts) and acts in one of three modes — finish here, hand off the resume
+  command, or open the session in a new terminal window. Use when user asks:
+  "find the session where I did X", "we already did this", "do it again like
+  back then", "resume/open that session", "what did we decide about…" /
+  «найди сессию где я делал X», «мы же это уже делали», «сделай ещё раз как
+  тогда», «восстанови проект Z», «открой сессию про…», «что мы решили насчёт…» /
+  "找到我做过X的会话", "继续那个会话", "打开那个项目". Not for brand-new tasks
+  with no past session.
 ---
 
 # session-orchestrator — найти сессию, погрузиться, продолжить

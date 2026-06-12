@@ -1,141 +1,147 @@
-# 🧠 claude-recall — память всех твоих сессий Claude Code
+# claude-recall
 
-Слой памяти и оркестрации для Claude Code: один поисковый индекс всего, что ты
-когда-либо делал в AI-сессиях, и три способа этим воспользоваться. Один файл Python,
-без зависимостей, без API-ключей.
+[Russian / Русский](docs/README_RU.md) | [Chinese / 中文](docs/README_ZH.md)
 
-[English version → README.en.md](README.en.md)
+![Claude Code](https://img.shields.io/badge/Claude_Code-skill+CLI-orange?style=flat-square)
+![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)
+![Version](https://img.shields.io/badge/version-0.2.0-blue?style=flat-square)
+![Zero deps](https://img.shields.io/badge/dependencies-0-blue?style=flat-square)
+![macOS](https://img.shields.io/badge/platform-macOS-lightgrey?style=flat-square)
 
-Этот репозиторий — для агентов в той же мере, что и для тебя. Дай агенту ссылку,
-скажи «прочитай START_HERE.md» — он развернёт всё по шагам.
+Your hundreds of past Claude Code sessions stop being a graveyard: say *"find the
+session where I exported that client's deals"* — and in a second you have the project,
+the method, the link to the finished artifact, and three ways to act on it.
 
-## 🚀 Быстрый старт
+**How it works:** every finished session is distilled by a small LLM (haiku) into a
+recap card; all cards roll up into one greppable INDEX.md — the single touchpoint for
+you and your agents. A bundled skill teaches any Claude Code session to search it and
+resume past work.
 
-Открой [START_HERE.md](START_HERE.md), скопируй промпт, вставь в Claude Code. Всё.
-Руками: `./install.sh` (ниже — что он делает).
-
-## Обещание
-
-Сотни твоих прошлых сессий перестают быть кладбищем. Говоришь любой сессии Claude Code:
-«найди, где я выгружал сделки этого клиента» — и через секунду у тебя проект, метод,
-ссылка на готовую таблицу и три кнопки: доделать здесь, дать команду, открыть то самое
-окно. Пикер `--resume` с невнятными заголовками больше не нужен.
-
-## Что на этом делают
-
-1. 🔁 «Сделай ещё раз ту выгрузку, но по клиенту X» — найдёт прошлую сессию, возьмёт её метод, повторит с новыми параметрами.
-2. 🪟 «Открой сессию, где мы пилили дашборд» — новое окно терминала с восстановленным живым контекстом.
-3. 🧠 «Что мы решили насчёт деплоя?» — ответ из recap-карточки, без раскопок по логам.
-4. 📋 «Что у меня висит недоделанного?» — `recall find in_progress`.
-5. 🧹 «Забудь ту сессию» — `recall remove`, и индекс её больше не покажет.
-
-## Как это устроено
+**Zero dependencies** — one Python file, no API keys (uses your existing `claude` auth).
 
 ```
-СЕССИЯ ЗАВЕРШИЛАСЬ → SessionEnd-хук            → transcript .jsonl
-РЕКАПЕР (haiku)    → сжимает сессию в карточку → ~/.claude/session-recaps/<id>.md
-ИНДЕКС             → строка на сессию          → INDEX.md  ← единая точка касания
-ОРКЕСТРАТОР (скилл)→ find → show → finish | handoff | spawn
+SESSION ENDS        → SessionEnd hook        → transcript .jsonl
+RECAPPER (haiku)    → distills into a card   → ~/.claude/session-recaps/<id>.md
+INDEX               → one line per session   → INDEX.md  ← the single touchpoint
+ORCHESTRATOR (skill)→ find → show → finish | handoff | spawn
 ```
 
-Карточка — это YAML на десять строк: задача, статус, метод (какой скилл/скрипт),
-сущности (имена, системы — для поиска), артефакты (URL готовых таблиц/страниц),
-что осталось. Пример:
+A recap card is ten lines of YAML:
 
 ```yaml
 id: c2631a96-...
 project: ~/Documents/Cursor/my-crm
-task: Выгрузка сделок уволенного логиста Ивановой в Google Sheet для РОПа
+task: Export deals of dismissed logist Ivanova to a Google Sheet for the sales lead
 status: done
-method: скилл export-dismissed + Sheets API
-entities: [Иванова, Bitrix]
+method: skill export-dismissed + Sheets API
+entities: [Ivanova, Bitrix]
 artifacts: [https://docs.google.com/spreadsheets/d/...]
 next: null
 ```
 
-Все карточки сворачиваются в **один INDEX.md** — строка на сессию, грепается мгновенно.
-Этот индекс читаешь и ты, и каждый твой агент.
+## Three interaction modes
 
-## Три режима
+| mode | you say | what happens |
+|------|---------|--------------|
+| **finish** | "do that export again, for client X" | Claude finds the past session, extracts project + method, redoes the task right here |
+| **handoff** | "give me the command" | `recall cmd <id>` → `cd "<project>" && claude --resume <id>` |
+| **spawn** | "open that session" | `recall open <id>` — a new terminal window opens with the session restored |
 
-| режим | ты говоришь | что происходит |
-|-------|-------------|----------------|
-| **finish** | «сделай ещё раз ту выгрузку, по клиенту X» | Claude находит прошлую сессию, достаёт проект + метод, повторяет задачу прямо тут |
-| **handoff** | «дай команду» | `recall cmd <id>` → `cd "<проект>" && claude --resume <id>` |
-| **spawn** | «открой ту сессию» | `recall open <id>` — новое окно терминала с восстановленной сессией |
+When several sessions match, the orchestrator doesn't guess — it shows a selector
+(project folder + date + task context per candidate, plus a "dig deeper" option).
 
-Если кандидатов несколько — оркестратор не гадает, а показывает селектор:
-папка + дата + контекст задачи на каждого, плюс вариант «копнуть глубже».
+## Installation
 
-## ⚠️ Прочитай ПЕРВЫМ
+Paste this into Claude Code:
 
-- **Карточки — выжимка твоих сессий** (имена клиентов, URL таблиц). Всё лежит локально
-  в `~/.claude/session-recaps/` и никуда не уезжает — но не коммить эту папку и не шарь её.
-- **Ключей нет вообще.** Рекапы идут через `claude -p` — твоя существующая авторизация
-  Claude Code. Ничего настраивать и нигде регистрироваться не надо.
-- **install.sh правит `~/.claude/settings.json`** — добавляет SessionEnd-хук и
-  permissions `Bash(recall *)` (чтобы агенты звали recall без промптов). Мержит
-  аккуратно, существующие настройки не трёт.
-- **backfill = LLM-вызов на каждую прошлую сессию** (~20–40 мин на пару сотен). Запускай
-  осознанно, можно ограничить: `--days 30`.
+> Clone github.com/rocketmandrey/claude-recall and run ./install.sh. Show me what it
+> changed, then ask me whether to run `recall backfill` (one small-LLM call per past
+> session, ~20–40 min for a few hundred).
 
-## 🗺️ Карта репозитория
-
-| Файл | Что внутри | Кому |
-|------|------------|------|
-| [START_HERE.md](START_HERE.md) | копипаст-промпт: агент ставит всё сам | человеку |
-| [AGENTS.md](AGENTS.md) | правила работы с recall | агенту |
-| [install.sh](install.sh) | установщик: CLI + скилл + хук + permissions | агенту/человеку |
-| [bin/recall](bin/recall) | весь продукт: один файл Python, ноль зависимостей | агенту |
-| [skill/SKILL.md](skill/SKILL.md) | скилл-оркестратор для Claude Code | Claude Code |
-| [README.en.md](README.en.md) | English version | the world |
-
-## Установка руками
+Or manually:
 
 ```bash
-git clone https://github.com/rocketmandrey/claude-recall && cd claude-recall
-./install.sh              # CLI + скилл + SessionEnd-хук + permissions
-recall backfill           # проиндексировать прошлые сессии (опционально)
+git clone https://github.com/rocketmandrey/claude-recall.git && cd claude-recall
+./install.sh              # CLI + skill + SessionEnd hook + permissions
+recall backfill           # optional: index your past sessions
 ```
 
-Дальше каждая завершённая сессия (≥15 событий) индексируется сама.
+`install.sh` merges into `~/.claude/settings.json` (never overwrites): the SessionEnd
+hook and `Bash(recall *)` permissions, so agents can call recall in any new session
+without prompts. From then on every finished session (≥15 events) is indexed
+automatically. Verify anytime with `recall doctor`.
+
+## Usage
+
+Just say in Claude Code:
+
+**English:**
+- "find the session where I exported those deals"
+- "we've done this before — do it again for client X"
+- "open the session where we built the dashboard"
+- "what do I have unfinished?"
+
+**Русский:**
+- «найди сессию, где я выгружал сделки»
+- «мы это уже делали — сделай ещё раз по клиенту X»
+- «открой сессию, где мы пилили дашборд»
+- «что у меня висит недоделанного?»
+
+**中文:**
+- "找到我导出交易数据的那个会话"
+- "我们以前做过这个 — 再为客户X做一次"
+- "打开我们做仪表盘的那个会话"
+- "我还有哪些没做完的任务？"
+
+### Examples
+
+**EN — repeat a past task:**
+> Do that dismissed-employees export again, but for Svetlana's regulars
+
+**RU — открыть прошлую сессию в новом окне:**
+> Открой сессию, где мы настраивали деплой welly — прям окошком
+
+**ZH — 查询过去的决定:**
+> 我们当时关于部署方案是怎么决定的？
+
+## Repository structure
+
+```
+claude-recall/
+├── bin/recall              ← the whole product: one Python file, zero deps
+├── skill/SKILL.md          ← session-orchestrator skill for Claude Code
+├── install.sh              ← installer: CLI + skill + hook + permissions
+└── docs/                   ← README translations (RU, ZH)
+```
 
 ## CLI
 
-```
-recall find <запрос...>    поиск по индексу (без регистра, OR; ищи по ОСНОВЕ слова)
-recall show <id8>          карточка сессии
-recall cmd <id8>           команда возобновления (handoff)
-recall open <id8>          открыть сессию в новом окне терминала (spawn, macOS)
-recall remove <id8>        забыть сессию: карточка + строка индекса + tombstone
-recall backfill            проиндексировать старые сессии [--days N] [--min-events N] [--jobs N]
-recall index               статистика индекса
-recall doctor              проверка установки
-```
+| command | what it does |
+|---------|--------------|
+| `recall find <query...>` | search the index (case-insensitive OR; search by word STEM) |
+| `recall show <id8>` | print a session's recap card |
+| `recall cmd <id8>` | print the resume command (handoff) |
+| `recall open <id8>` | open the session in a new terminal window (spawn) |
+| `recall remove <id8>` | forget a session: card + index line + tombstone |
+| `recall backfill` | index existing sessions `[--days N] [--min-events N] [--jobs N]` |
+| `recall index` | index stats |
+| `recall doctor` | check installation |
 
-Env: `RECALL_DATA`, `RECALL_MODEL`, `RECALL_TERMINAL` (`Terminal`|`iTerm`),
-`RECALL_MIN_EVENTS`.
+Env: `RECALL_DATA` (default `~/.claude/session-recaps`), `RECALL_MODEL` (default haiku),
+`RECALL_TERMINAL` (`Terminal`\|`iTerm`), `RECALL_MIN_EVENTS` (default 15).
 
-## Мини-словарь
+## Requirements & notes
 
-- **Сессия** — один чат с Claude Code; её сырой лог (transcript, `.jsonl`) Claude хранит сам в `~/.claude/projects/`.
-- **Recap-карточка** — выжимка сессии на 10 строк, которую делает маленькая модель (haiku).
-- **Индекс** — один файл, строка на сессию; то, по чему ищут.
-- **Хук** — команда, которую Claude Code запускает сам на событие (здесь: «сессия завершилась»).
-- **Скилл** — инструкция, которую любая сессия Claude Code подхватывает автоматически.
+- macOS (`recall open` uses AppleScript; Linux PRs welcome), python3 ≥ 3.9, logged-in `claude` CLI.
+- **Local-first**: cards and the index never leave your machine. They do contain
+  distilled session content — don't commit or share the data dir.
+- Recap calls go through `claude -p` — your existing auth, no API key. Worker sessions
+  are marked and never index themselves.
+- `recall remove` tombstones a session so hook/backfill won't resurrect it
+  (undo: `recall recap <transcript> --force`).
+- Pairs well with [codbash](https://www.npmjs.com/package/codbash-app) as full-text
+  fallback and web dashboard; not required.
 
-## Грабли, которые мы выстрадали
-
-- Ищи по **основе слова**: «Ивановой» → `иванов`, иначе русская морфология съест результаты.
-- Кириллица в путях проектов превращается у Claude в дефисы — поэтому recall берёт
-  реальную папку изнутри transcript, а не из имени директории.
-- `claude -p` сам создаёт сессию на каждый рекап — без маркера-предохранителя индекс
-  начинает индексировать сам себя. Маркер вшит.
-- Пока macOS (`recall open` через AppleScript). PR для Linux приветствуются.
-
-## Лицензия
+## License
 
 MIT
-
----
-*Сделано в рамках мастермайнда «Вайбкодинг для предпринимателей». Автор — Андрей Овчаренко.*
