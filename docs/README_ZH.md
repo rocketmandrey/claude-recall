@@ -132,8 +132,15 @@ haiku）、`RECALL_TERMINAL`（`Terminal`\|`iTerm`）、`RECALL_MIN_EVENTS`（�
   （撤销：`recall recap <transcript> --force`）。
 - handoff 卡片（如已启用循环）每个仅几 KB，30 天后自动清理；长期记忆存于 recap
   卡片。通过 `recall open` 恢复的会话会自动收到自己的 handoff——醒来即知下一步。
-- 与 [codbash](https://www.npmjs.com/package/codbash-app) 搭配使用效果更佳（全文
-  检索 + 网页仪表盘）；非必需。
+- 与 Valerii Kovalskii 的 [codbash](https://github.com/vakovalskii/codbash) 搭配
+  使用效果更佳（全文检索 + 网页仪表盘）——如已安装，recall 会自动集成；二者不共享
+  代码，也非必需。
+
+## 致谢
+
+recall 源于对 Valerii Kovalskii 的 [codbash](https://github.com/vakovalskii/codbash)
+（Claude Code / Codex 会话仪表盘 + 全文检索）的日常使用。recall 不包含 codbash 的
+任何代码；但如已安装，编排 skill 会将其用作全文检索后备。Respect, Valera!
 
 ## 许可证
 

@@ -110,7 +110,7 @@ Just say in Claude Code:
 > Do that dismissed-employees export again, but for Svetlana's regulars
 
 **RU — открыть прошлую сессию в новом окне:**
-> Открой сессию, где мы настраивали деплой welly — прям окошком
+> Открой сессию, где мы настраивали деплой — прям окошком
 
 **ZH — 查询过去的决定:**
 > 我们当时关于部署方案是怎么决定的？
@@ -156,8 +156,16 @@ Env: `RECALL_DATA` (default `~/.claude/session-recaps`), `RECALL_MODEL` (default
   30 days; long-term memory lives in the recap cards. A session resumed via
   `recall open` gets its handoff re-injected automatically — it wakes up knowing
   its next steps.
-- Pairs well with [codbash](https://www.npmjs.com/package/codbash-app) as full-text
-  fallback and web dashboard; not required.
+- Pairs well with [codbash](https://github.com/vakovalskii/codbash) by Valerii
+  Kovalskii as full-text fallback and web dashboard — recall integrates with it
+  if installed, but shares no code with it and doesn't require it.
+
+## Acknowledgements
+
+recall grew out of daily use of [codbash](https://github.com/vakovalskii/codbash) by
+Valerii Kovalskii — a dashboard + full-text search across Claude Code / Codex sessions.
+recall contains none of codbash's code, but if codbash is installed, the orchestrator
+skill falls back to it for full-text search. Respect, Valera.
 
 ## License
 
