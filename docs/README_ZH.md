@@ -12,12 +12,12 @@ skill 让任何 Claude Code 会话都能搜索索引并恢复过去的工作。
 **零依赖**——单个 Python 文件，无需 API 密钥（使用你现有的 `claude` 登录授权）。
 
 ```
-会话结束           → SessionEnd 钩子      → recap 卡片 + handoff 卡片
+会话结束           → SessionEnd 钩子      → recap 卡片（+ handoff，如已启用）
 压缩器 (haiku)     → 提炼成卡片           → ~/.claude/session-recaps/<id>.md
 索引               → 每个会话一行         → INDEX.md  ← 唯一接触点
 编排器 (skill)     → find → show → finish | handoff | spawn
 
-上下文压缩?        → PreCompact 钩子写入最新 HANDOFF（当前任务 / 已完成 /
+可选: handoff 循环 → PreCompact 钩子写入最新 HANDOFF（当前任务 / 已完成 /
                      进行中 / 下一步 / 注意事项）→ SessionStart 重新注入 ——
                      会话醒来时清楚知道刚才做到哪里
 ```
@@ -50,9 +50,9 @@ next: null
 
 在 Claude Code 中粘贴：
 
-> 克隆 github.com/rocketmandrey/claude-recall 并运行 ./install.sh。展示它做了哪些
-> 更改，然后问我是否运行 `recall backfill`（每个历史会话一次小模型调用，几百个会话
-> 约 20–40 分钟）。
+> 克隆 github.com/rocketmandrey/claude-recall 并运行 ./install.sh。先问我是否启用
+> 可选的 handoff 循环，展示它做了哪些更改，然后问我是否运行 `recall backfill`
+> （每个历史会话一次小模型调用，几百个会话约 20–40 分钟）。
 
 或手动安装：
 
@@ -62,11 +62,15 @@ git clone https://github.com/rocketmandrey/claude-recall.git && cd claude-recall
 recall backfill           # 可选：索引历史会话
 ```
 
-`install.sh` 合并写入 `~/.claude/settings.json`（绝不覆盖）：SessionEnd 钩子
-（recap + handoff）、PreCompact handoff 钩子、SessionStart 恢复钩子，以及
+`install.sh` 合并写入 `~/.claude/settings.json`（绝不覆盖）：SessionEnd 钩子和
 `Bash(recall *)` 权限——智能体在任何新会话中调用 recall 都无需弹窗确认。此后每个
-结束的会话（≥15 个事件）都会自动索引，每次压缩/恢复都经过 handoff 卡片。
-随时用 `recall doctor` 检查。
+结束的会话（≥15 个事件）都会自动索引。
+
+**handoff 持续性循环是可选的（opt-in）**——安装器会提议，但绝不强制：每次上下文
+压缩前，小模型写入一张状态卡片，压缩/恢复后重新注入——会话醒来时清楚知道刚才做到
+哪里。成本：每次压缩一次 haiku 调用。参数：`./install.sh --with-handoff` /
+`--no-handoff`（不带参数时安装器会询问；重新安装时保留之前的选择）。随时用
+`recall doctor` 检查。
 
 ## 使用方法
 
@@ -126,8 +130,8 @@ haiku）、`RECALL_TERMINAL`（`Terminal`\|`iTerm`）、`RECALL_MIN_EVENTS`（�
   标记，绝不会索引自身。
 - `recall remove` 会设置墓碑标记，钩子/backfill 不会复活它
   （撤销：`recall recap <transcript> --force`）。
-- handoff 卡片每个仅几 KB，30 天后自动清理；长期记忆存于 recap 卡片。通过
-  `recall open` 恢复的会话会自动收到自己的 handoff——醒来即知下一步。
+- handoff 卡片（如已启用循环）每个仅几 KB，30 天后自动清理；长期记忆存于 recap
+  卡片。通过 `recall open` 恢复的会话会自动收到自己的 handoff——醒来即知下一步。
 - 与 [codbash](https://www.npmjs.com/package/codbash-app) 搭配使用效果更佳（全文
   检索 + 网页仪表盘）；非必需。
 

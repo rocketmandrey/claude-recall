@@ -1,7 +1,20 @@
 #!/bin/bash
-# claude-recall installer: CLI + Claude Code skill + SessionEnd hook.
-# Usage: ./install.sh [--backfill]
+# claude-recall installer: CLI + Claude Code skill + hooks.
+# Usage: ./install.sh [--backfill] [--with-handoff|--no-handoff]
+#   --with-handoff   enable the optional handoff continuity loop (PreCompact + SessionStart)
+#   --no-handoff     skip it (core index/orchestrator works fine without)
+#   neither          keep current state if already installed; otherwise ask (TTY) / skip
 set -euo pipefail
+
+HANDOFF=""
+BACKFILL=0
+for arg in "$@"; do
+  case "$arg" in
+    --with-handoff) HANDOFF=1 ;;
+    --no-handoff)   HANDOFF=0 ;;
+    --backfill)     BACKFILL=1 ;;
+  esac
+done
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 RECALL_HOME="$HOME/.claude/recall"
@@ -30,11 +43,27 @@ mkdir -p "$SKILL_DIR"
 cp "$REPO_DIR/skill/SKILL.md" "$SKILL_DIR/SKILL.md"
 echo "  ✓ skill -> $SKILL_DIR"
 
-# 3. Hooks (SessionEnd recap+handoff, PreCompact handoff, SessionStart restore)
-#    + permissions — merged into settings.json, idempotent, never overwrites yours
-python3 - "$SETTINGS" "$RECALL_HOME/bin/recall" <<'PY'
+# 3. Handoff loop is opt-in: offer it, don't force it
+if [[ -z "$HANDOFF" ]]; then
+  if grep -q "recall restore-hook" "$SETTINGS" 2>/dev/null; then
+    HANDOFF=1   # already enabled earlier — keep it
+  elif [[ -t 0 ]]; then
+    echo
+    echo "Optional: handoff continuity loop. Before every context compaction a small LLM"
+    echo "writes a state card (task / done / in flight / next), re-injected after"
+    echo "compact/resume — the session wakes up knowing where it left off."
+    echo "Cost: one haiku call per compaction. Enable later anytime: ./install.sh --with-handoff"
+    read -r -p "Enable the handoff loop? [y/N] " ans
+    if [[ "$ans" =~ ^[YyДд] ]]; then HANDOFF=1; else HANDOFF=0; fi
+  else
+    HANDOFF=0   # non-interactive, no flag: core only
+  fi
+fi
+
+# 4. Hooks + permissions — merged into settings.json, idempotent, never overwrites yours
+python3 - "$SETTINGS" "$RECALL_HOME/bin/recall" "$HANDOFF" <<'PY'
 import json, os, sys
-settings_path, rbin = sys.argv[1], sys.argv[2]
+settings_path, rbin, handoff = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
 settings = {}
 if os.path.exists(settings_path):
     settings = json.load(open(settings_path))
@@ -53,14 +82,17 @@ ends = scrub("SessionEnd", "recall hook", "session_end_hook.sh")
 ends.append({"hooks": [{"type": "command", "command": f"{rbin} hook", "timeout": 15}]})
 
 pre = scrub("PreCompact", "recall handoff-hook")
-for m in ("auto", "manual"):
-    pre.append({"matcher": m, "hooks": [{"type": "command",
-                "command": f"{rbin} handoff-hook", "timeout": 120}]})
-
 ss = scrub("SessionStart", "recall restore-hook")
-for m in ("compact", "resume"):
-    ss.append({"matcher": m, "hooks": [{"type": "command",
-               "command": f"{rbin} restore-hook", "timeout": 10}]})
+if handoff:
+    for m in ("auto", "manual"):
+        pre.append({"matcher": m, "hooks": [{"type": "command",
+                    "command": f"{rbin} handoff-hook", "timeout": 120}]})
+    for m in ("compact", "resume"):
+        ss.append({"matcher": m, "hooks": [{"type": "command",
+                   "command": f"{rbin} restore-hook", "timeout": 10}]})
+for ev in ("PreCompact", "SessionStart", "SessionEnd"):
+    if ev in hooks and not hooks[ev]:
+        del hooks[ev]
 
 allow = settings.setdefault("permissions", {}).setdefault("allow", [])
 for rule in ("Bash(recall)", "Bash(recall *)"):
@@ -68,15 +100,17 @@ for rule in ("Bash(recall)", "Bash(recall *)"):
         allow.append(rule)
 
 json.dump(settings, open(settings_path, "w"), indent=2, ensure_ascii=False)
-print("  ✓ hooks (SessionEnd, PreCompact, SessionStart) + permissions -> " + settings_path)
+state = "ON" if handoff else "off (optional; ./install.sh --with-handoff)"
+print("  ✓ SessionEnd hook + permissions -> " + settings_path)
+print("  ✓ handoff loop: " + state)
 PY
 
-# 4. Verify
+# 5. Verify
 echo
 "$RECALL_HOME/bin/recall" doctor || true
 
-# 5. Optional backfill
-if [[ "${1:-}" == "--backfill" ]]; then
+# 6. Optional backfill
+if [[ "$BACKFILL" == "1" ]]; then
   echo; echo "backfilling past sessions (this calls a small LLM per session, takes a while)..."
   "$RECALL_HOME/bin/recall" backfill
 else

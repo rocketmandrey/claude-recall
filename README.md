@@ -4,7 +4,7 @@
 
 ![Claude Code](https://img.shields.io/badge/Claude_Code-skill+CLI-orange?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)
-![Version](https://img.shields.io/badge/version-0.3.0-blue?style=flat-square)
+![Version](https://img.shields.io/badge/version-0.3.1-blue?style=flat-square)
 ![Zero deps](https://img.shields.io/badge/dependencies-0-blue?style=flat-square)
 ![macOS](https://img.shields.io/badge/platform-macOS-lightgrey?style=flat-square)
 
@@ -20,13 +20,13 @@ resume past work.
 **Zero dependencies** — one Python file, no API keys (uses your existing `claude` auth).
 
 ```
-SESSION ENDS        → SessionEnd hook        → recap card + handoff card
+SESSION ENDS        → SessionEnd hook        → recap card (+ handoff if enabled)
 RECAPPER (haiku)    → distills into a card   → ~/.claude/session-recaps/<id>.md
 INDEX               → one line per session   → INDEX.md  ← the single touchpoint
 ORCHESTRATOR (skill)→ find → show → finish | handoff | spawn
 
-CONTEXT COMPACTION? → PreCompact hook writes a fresh HANDOFF (task / done /
-                      in flight / next / gotchas) → SessionStart re-injects it —
+OPT-IN: CONTINUITY  → PreCompact hook writes a fresh HANDOFF (task / done /
+LOOP                  in flight / next / gotchas) → SessionStart re-injects it —
                       the session wakes up knowing exactly where it left off
 ```
 
@@ -58,9 +58,9 @@ When several sessions match, the orchestrator doesn't guess — it shows a selec
 
 Paste this into Claude Code:
 
-> Clone github.com/rocketmandrey/claude-recall and run ./install.sh. Show me what it
-> changed, then ask me whether to run `recall backfill` (one small-LLM call per past
-> session, ~20–40 min for a few hundred).
+> Clone github.com/rocketmandrey/claude-recall and run ./install.sh. Ask me whether to
+> enable the optional handoff loop, show me what it changed, then ask me whether to run
+> `recall backfill` (one small-LLM call per past session, ~20–40 min for a few hundred).
 
 Or manually:
 
@@ -71,11 +71,16 @@ recall backfill           # optional: index your past sessions
 ```
 
 `install.sh` merges into `~/.claude/settings.json` (never overwrites): the SessionEnd
-hook (recap + handoff), the PreCompact handoff hook, the SessionStart restore hook,
-and `Bash(recall *)` permissions, so agents can call recall in any new session without
-prompts. From then on every finished session (≥15 events) is indexed automatically,
-and every compaction/resume round-trips through a handoff card. Verify anytime with
-`recall doctor`.
+hook and `Bash(recall *)` permissions, so agents can call recall in any new session
+without prompts. From then on every finished session (≥15 events) is indexed
+automatically.
+
+The **handoff continuity loop is opt-in** — the installer offers it (and never
+forces it): before every context compaction a small LLM writes a state card,
+re-injected after compact/resume, so the session wakes up knowing where it left
+off. Cost: one haiku call per compaction. Flags: `./install.sh --with-handoff` /
+`--no-handoff` (no flag → the installer asks; a previous choice is kept on
+reinstall). Verify anytime with `recall doctor`.
 
 ## Usage
 
@@ -147,9 +152,10 @@ Env: `RECALL_DATA` (default `~/.claude/session-recaps`), `RECALL_MODEL` (default
   are marked and never index themselves.
 - `recall remove` tombstones a session so hook/backfill won't resurrect it
   (undo: `recall recap <transcript> --force`).
-- Handoff cards are a few KB each and auto-pruned after 30 days; long-term memory
-  lives in the recap cards. A session resumed via `recall open` gets its handoff
-  re-injected automatically — it wakes up knowing its next steps.
+- Handoff cards (if the loop is enabled) are a few KB each and auto-pruned after
+  30 days; long-term memory lives in the recap cards. A session resumed via
+  `recall open` gets its handoff re-injected automatically — it wakes up knowing
+  its next steps.
 - Pairs well with [codbash](https://www.npmjs.com/package/codbash-app) as full-text
   fallback and web dashboard; not required.
 

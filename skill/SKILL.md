@@ -98,9 +98,11 @@ SessionEnd-хук (`recall hook` в `~/.claude/settings.json`) рекапит к
 `recall doctor` (проверяет и permissions: установщик прописывает `Bash(recall *)`
 в allow — recall работает в любой сессии без промптов).
 
-## Handoff-слой (непрерывность)
+## Handoff-слой (непрерывность; опционален)
 
-Перед каждым автокомпактом PreCompact-хук пишет **handoff-карточку** сессии
+Петля включается при установке (`./install.sh --with-handoff`; `recall doctor`
+покажет её статус). Если включена: перед каждым автокомпактом PreCompact-хук
+пишет **handoff-карточку** сессии
 (`~/.claude/session-recaps/handoffs/<id>.md`: task now / done / in flight / next /
 gotchas), а SessionStart-хук (compact|resume) вливает её обратно в контекст. Значит:
 после компакта и при `recall open` сессия сама знает, на чём остановилась — не

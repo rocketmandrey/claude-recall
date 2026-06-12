@@ -23,7 +23,7 @@ import re
 import subprocess
 import sys
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 DATA = os.environ.get("RECALL_DATA", os.path.expanduser("~/.claude/session-recaps"))
 MODEL = os.environ.get("RECALL_MODEL", "claude-haiku-4-5-20251001")
 MIN_EVENTS = int(os.environ.get("RECALL_MIN_EVENTS", "15"))
@@ -216,6 +216,15 @@ Session digest:
     print(f"handoff {session_id[:8]} -> {path}")
 
 
+def handoff_enabled():
+    """The handoff loop is opt-in: it's on iff its hooks are in settings.json."""
+    settings = os.path.expanduser("~/.claude/settings.json")
+    try:
+        return "recall restore-hook" in open(settings, encoding="utf-8").read()
+    except OSError:
+        return False
+
+
 def prune_handoffs(days=HANDOFF_DAYS):
     import time
     cutoff = time.time() - days * 86400
@@ -344,8 +353,11 @@ def cmd_hook():
     with open(transcript, errors="replace") as f:
         if sum(1 for _ in f) < MIN_EVENTS:
             return
+    subs = ["recap"]
+    if handoff_enabled():  # handoff too: a spawn-resumed session wakes up informed
+        subs.append("handoff")
     with open(LOG, "a") as log:
-        for sub in ("recap", "handoff"):  # handoff too: a spawn-resumed session wakes up informed
+        for sub in subs:
             subprocess.Popen([sys.executable, os.path.abspath(__file__), sub, transcript],
                              stdout=log, stderr=log, start_new_session=True)
 
@@ -384,11 +396,12 @@ def cmd_doctor():
     settings = os.path.expanduser("~/.claude/settings.json")
     stext = open(settings, encoding="utf-8").read() if os.path.exists(settings) else ""
     good &= ok("recall hook" in stext, "SessionEnd hook registered in ~/.claude/settings.json")
-    good &= ok("recall handoff-hook" in stext, "PreCompact handoff hook registered")
-    good &= ok("recall restore-hook" in stext, "SessionStart restore hook registered")
     ok("Bash(recall" in stext, "permissions: recall allowed without prompts (Bash(recall *))")
-    n_h = len(glob.glob(os.path.join(HANDOFFS, "*.md")))
-    ok(True, f"handoffs: {n_h} live (auto-pruned after {HANDOFF_DAYS} days)")
+    if handoff_enabled():
+        n_h = len(glob.glob(os.path.join(HANDOFFS, "*.md")))
+        ok(True, f"handoff loop: ON — {n_h} live handoffs (auto-pruned after {HANDOFF_DAYS} days)")
+    else:
+        ok(True, "handoff loop: off (optional — enable: ./install.sh --with-handoff)")
     ok(shutil.which("codbash"), "codbash (optional full-text fallback + dashboard)")
     sys.exit(0 if good else 1)
 
