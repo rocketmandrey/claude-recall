@@ -4,7 +4,7 @@
 
 ![Claude Code](https://img.shields.io/badge/Claude_Code-skill+CLI-orange?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)
-![Version](https://img.shields.io/badge/version-0.4.0-blue?style=flat-square)
+![Version](https://img.shields.io/badge/version-0.4.1-blue?style=flat-square)
 ![Zero deps](https://img.shields.io/badge/dependencies-0-blue?style=flat-square)
 ![macOS](https://img.shields.io/badge/platform-macOS-lightgrey?style=flat-square)
 

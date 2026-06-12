@@ -23,7 +23,7 @@ import re
 import subprocess
 import sys
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 DATA = os.environ.get("RECALL_DATA", os.path.expanduser("~/.claude/session-recaps"))
 MODEL = os.environ.get("RECALL_MODEL", "claude-haiku-4-5-20251001")
 MIN_EVENTS = int(os.environ.get("RECALL_MIN_EVENTS", "15"))
@@ -177,6 +177,12 @@ def cmd_recap(transcript, force=False):
             f.write("\n".join(keep) + ("\n" if keep else ""))
     if os.path.exists(card_path) and not force \
             and os.path.getmtime(card_path) >= os.path.getmtime(transcript):
+        if AUTONAME and session_id[:8] not in autonamed_ids():
+            # title already-recapped sessions from their card — no LLM call
+            meta = card_meta(card_path)
+            m = re.search(r"^task:\s*(.+)$", meta["text"], re.M)
+            if m and apply_title(transcript, session_title(meta["project"], m.group(1))):
+                os.utime(card_path)  # keep card newer than the transcript we just touched
         print(f"skip {session_id[:8]} (up to date)")
         return
     t = parse_transcript(transcript)
@@ -216,27 +222,34 @@ def session_title(cwd, task):
     return title if len(title) <= 80 else title[:79].rsplit(" ", 1)[0] + "…"
 
 
+def registry_entries(session_id):
+    for p in glob.glob(os.path.join(SESSIONS_DIR, "*.json")):
+        try:
+            d = json.load(open(p, encoding="utf-8"))
+        except Exception:
+            continue
+        if d.get("sessionId") == session_id:
+            yield p, d
+
+
 def apply_title(transcript, title, manual=False):
     """Rename a session the way /rename does: append custom-title + agent-name
     records to its transcript, sync the live-session registry if it's running."""
     session_id = os.path.basename(transcript).replace(".jsonl", "")
-    if not manual:  # a title the user set by hand is never overwritten
-        has_title = subprocess.run(["grep", "-q", '"type":"custom-title"', transcript],
-                                   capture_output=True).returncode == 0
-        if has_title and session_id[:8] not in autonamed_ids():
-            return
+    if not manual and session_id[:8] not in autonamed_ids():
+        # a title the USER set (via /rename, claude -n, ...) is never overwritten
+        named = subprocess.run(["grep", "-q", '"type":"custom-title"', transcript],
+                               capture_output=True).returncode == 0
+        named = named or any(d.get("name") for _, d in registry_entries(session_id))
+        if named:
+            return False
     with open(transcript, "a", encoding="utf-8") as f:
         for typ, key in (("custom-title", "customTitle"), ("agent-name", "agentName")):
             f.write(json.dumps({"type": typ, key: title, "sessionId": session_id},
                                ensure_ascii=False) + "\n")
-    for p in glob.glob(os.path.join(SESSIONS_DIR, "*.json")):
-        try:
-            d = json.load(open(p, encoding="utf-8"))
-            if d.get("sessionId") == session_id:
-                d["name"] = title
-                json.dump(d, open(p, "w", encoding="utf-8"), ensure_ascii=False)
-        except Exception:
-            continue
+    for p, d in registry_entries(session_id):
+        d["name"] = title
+        json.dump(d, open(p, "w", encoding="utf-8"), ensure_ascii=False)
     with open(AUTONAMED, "a+", encoding="utf-8") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         f.seek(0)
@@ -246,6 +259,7 @@ def apply_title(transcript, title, manual=False):
         f.truncate()
         f.write("\n".join(sorted(marks)) + ("\n" if marks else ""))
     print(f"title {session_id[:8]} -> {title}")
+    return True
 
 
 def find_transcript(id_prefix):
