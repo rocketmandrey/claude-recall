@@ -16,10 +16,14 @@ recap-карточку; все карточки сворачиваются в о
 существующую авторизацию `claude`).
 
 ```
-СЕССИЯ ЗАВЕРШИЛАСЬ → SessionEnd-хук            → transcript .jsonl
+СЕССИЯ ЗАВЕРШИЛАСЬ → SessionEnd-хук            → recap-карточка + handoff-карточка
 РЕКАПЕР (haiku)    → сжимает сессию в карточку → ~/.claude/session-recaps/<id>.md
 ИНДЕКС             → строка на сессию          → INDEX.md  ← единая точка касания
 ОРКЕСТРАТОР (скилл)→ find → show → finish | handoff | spawn
+
+АВТОКОМПАКТ?       → PreCompact-хук пишет свежий HANDOFF (задача / сделано /
+                     в полёте / дальше / грабли) → SessionStart вливает его
+                     обратно — сессия просыпается, зная, на чём остановилась
 ```
 
 Recap-карточка — десять строк YAML:
@@ -63,9 +67,11 @@ recall backfill           # опционально: проиндексирова
 ```
 
 `install.sh` мержит в `~/.claude/settings.json` (никогда не перезаписывает):
-SessionEnd-хук и permissions `Bash(recall *)` — чтобы агенты звали recall в любой
+SessionEnd-хук (recap + handoff), PreCompact-хук handoff'а, SessionStart-хук
+восстановления и permissions `Bash(recall *)` — чтобы агенты звали recall в любой
 новой сессии без промптов. Дальше каждая завершённая сессия (≥15 событий)
-индексируется сама. Проверка: `recall doctor`.
+индексируется сама, а каждый компакт/резюм проходит через handoff-карточку.
+Проверка: `recall doctor`.
 
 ## Использование
 
@@ -107,12 +113,14 @@ claude-recall/
 | `recall cmd <id8>` | команда возобновления (handoff) |
 | `recall open <id8>` | открыть сессию в новом окне терминала (spawn) |
 | `recall remove <id8>` | забыть сессию: карточка + строка индекса + tombstone |
+| `recall handoff <file.jsonl>` | записать handoff-карточку (текущее состояние) сессии |
 | `recall backfill` | проиндексировать старые сессии `[--days N] [--min-events N] [--jobs N]` |
 | `recall index` | статистика индекса |
 | `recall doctor` | проверка установки |
 
 Env: `RECALL_DATA` (по умолчанию `~/.claude/session-recaps`), `RECALL_MODEL`
-(по умолчанию haiku), `RECALL_TERMINAL` (`Terminal`\|`iTerm`), `RECALL_MIN_EVENTS` (15).
+(по умолчанию haiku), `RECALL_TERMINAL` (`Terminal`\|`iTerm`), `RECALL_MIN_EVENTS` (15),
+`RECALL_HANDOFF_DAYS` (30 — срок хранения handoff'ов).
 
 ## Требования и заметки
 
@@ -124,6 +132,9 @@ Env: `RECALL_DATA` (по умолчанию `~/.claude/session-recaps`), `RECALL
   Сессии-воркеры помечены и сами никогда не индексируются.
 - `recall remove` ставит tombstone — хук/backfill сессию не воскресят
   (вернуть: `recall recap <transcript> --force`).
+- Handoff-карточки весят пару КБ и автоматически чистятся через 30 дней;
+  долгая память живёт в recap-карточках. Сессия, открытая через `recall open`,
+  получает свой handoff автоматически — просыпается, зная следующие шаги.
 - Отлично сочетается с [codbash](https://www.npmjs.com/package/codbash-app) как
   полнотекстовый fallback и веб-дашборд; не обязателен.
 

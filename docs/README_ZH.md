@@ -12,10 +12,14 @@ skill 让任何 Claude Code 会话都能搜索索引并恢复过去的工作。
 **零依赖**——单个 Python 文件，无需 API 密钥（使用你现有的 `claude` 登录授权）。
 
 ```
-会话结束           → SessionEnd 钩子      → transcript .jsonl
+会话结束           → SessionEnd 钩子      → recap 卡片 + handoff 卡片
 压缩器 (haiku)     → 提炼成卡片           → ~/.claude/session-recaps/<id>.md
 索引               → 每个会话一行         → INDEX.md  ← 唯一接触点
 编排器 (skill)     → find → show → finish | handoff | spawn
+
+上下文压缩?        → PreCompact 钩子写入最新 HANDOFF（当前任务 / 已完成 /
+                     进行中 / 下一步 / 注意事项）→ SessionStart 重新注入 ——
+                     会话醒来时清楚知道刚才做到哪里
 ```
 
 recap 卡片是十行 YAML：
@@ -58,9 +62,11 @@ git clone https://github.com/rocketmandrey/claude-recall.git && cd claude-recall
 recall backfill           # 可选：索引历史会话
 ```
 
-`install.sh` 合并写入 `~/.claude/settings.json`（绝不覆盖）：SessionEnd 钩子和
+`install.sh` 合并写入 `~/.claude/settings.json`（绝不覆盖）：SessionEnd 钩子
+（recap + handoff）、PreCompact handoff 钩子、SessionStart 恢复钩子，以及
 `Bash(recall *)` 权限——智能体在任何新会话中调用 recall 都无需弹窗确认。此后每个
-结束的会话（≥15 个事件）都会自动索引。随时用 `recall doctor` 检查。
+结束的会话（≥15 个事件）都会自动索引，每次压缩/恢复都经过 handoff 卡片。
+随时用 `recall doctor` 检查。
 
 ## 使用方法
 
@@ -101,12 +107,14 @@ claude-recall/
 | `recall cmd <id8>` | 打印恢复命令（handoff） |
 | `recall open <id8>` | 在新终端窗口打开会话（spawn） |
 | `recall remove <id8>` | 遗忘会话：卡片 + 索引行 + 墓碑标记 |
+| `recall handoff <file.jsonl>` | 为会话写入 handoff 卡片（进行中状态） |
 | `recall backfill` | 索引现有会话 `[--days N] [--min-events N] [--jobs N]` |
 | `recall index` | 索引统计 |
 | `recall doctor` | 检查安装 |
 
 环境变量：`RECALL_DATA`（默认 `~/.claude/session-recaps`）、`RECALL_MODEL`（默认
-haiku）、`RECALL_TERMINAL`（`Terminal`\|`iTerm`）、`RECALL_MIN_EVENTS`（默认 15）。
+haiku）、`RECALL_TERMINAL`（`Terminal`\|`iTerm`）、`RECALL_MIN_EVENTS`（默认 15）、
+`RECALL_HANDOFF_DAYS`（默认 30 —— handoff 保留期）。
 
 ## 要求与说明
 
@@ -118,6 +126,8 @@ haiku）、`RECALL_TERMINAL`（`Terminal`\|`iTerm`）、`RECALL_MIN_EVENTS`（�
   标记，绝不会索引自身。
 - `recall remove` 会设置墓碑标记，钩子/backfill 不会复活它
   （撤销：`recall recap <transcript> --force`）。
+- handoff 卡片每个仅几 KB，30 天后自动清理；长期记忆存于 recap 卡片。通过
+  `recall open` 恢复的会话会自动收到自己的 handoff——醒来即知下一步。
 - 与 [codbash](https://www.npmjs.com/package/codbash-app) 搭配使用效果更佳（全文
   检索 + 网页仪表盘）；非必需。
 

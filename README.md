@@ -4,7 +4,7 @@
 
 ![Claude Code](https://img.shields.io/badge/Claude_Code-skill+CLI-orange?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)
-![Version](https://img.shields.io/badge/version-0.2.0-blue?style=flat-square)
+![Version](https://img.shields.io/badge/version-0.3.0-blue?style=flat-square)
 ![Zero deps](https://img.shields.io/badge/dependencies-0-blue?style=flat-square)
 ![macOS](https://img.shields.io/badge/platform-macOS-lightgrey?style=flat-square)
 
@@ -20,10 +20,14 @@ resume past work.
 **Zero dependencies** — one Python file, no API keys (uses your existing `claude` auth).
 
 ```
-SESSION ENDS        → SessionEnd hook        → transcript .jsonl
+SESSION ENDS        → SessionEnd hook        → recap card + handoff card
 RECAPPER (haiku)    → distills into a card   → ~/.claude/session-recaps/<id>.md
 INDEX               → one line per session   → INDEX.md  ← the single touchpoint
 ORCHESTRATOR (skill)→ find → show → finish | handoff | spawn
+
+CONTEXT COMPACTION? → PreCompact hook writes a fresh HANDOFF (task / done /
+                      in flight / next / gotchas) → SessionStart re-injects it —
+                      the session wakes up knowing exactly where it left off
 ```
 
 A recap card is ten lines of YAML:
@@ -67,9 +71,11 @@ recall backfill           # optional: index your past sessions
 ```
 
 `install.sh` merges into `~/.claude/settings.json` (never overwrites): the SessionEnd
-hook and `Bash(recall *)` permissions, so agents can call recall in any new session
-without prompts. From then on every finished session (≥15 events) is indexed
-automatically. Verify anytime with `recall doctor`.
+hook (recap + handoff), the PreCompact handoff hook, the SessionStart restore hook,
+and `Bash(recall *)` permissions, so agents can call recall in any new session without
+prompts. From then on every finished session (≥15 events) is indexed automatically,
+and every compaction/resume round-trips through a handoff card. Verify anytime with
+`recall doctor`.
 
 ## Usage
 
@@ -123,12 +129,14 @@ claude-recall/
 | `recall cmd <id8>` | print the resume command (handoff) |
 | `recall open <id8>` | open the session in a new terminal window (spawn) |
 | `recall remove <id8>` | forget a session: card + index line + tombstone |
+| `recall handoff <file.jsonl>` | write a handoff card (in-flight state) for a session |
 | `recall backfill` | index existing sessions `[--days N] [--min-events N] [--jobs N]` |
 | `recall index` | index stats |
 | `recall doctor` | check installation |
 
 Env: `RECALL_DATA` (default `~/.claude/session-recaps`), `RECALL_MODEL` (default haiku),
-`RECALL_TERMINAL` (`Terminal`\|`iTerm`), `RECALL_MIN_EVENTS` (default 15).
+`RECALL_TERMINAL` (`Terminal`\|`iTerm`), `RECALL_MIN_EVENTS` (default 15),
+`RECALL_HANDOFF_DAYS` (default 30 — handoff retention).
 
 ## Requirements & notes
 
@@ -139,6 +147,9 @@ Env: `RECALL_DATA` (default `~/.claude/session-recaps`), `RECALL_MODEL` (default
   are marked and never index themselves.
 - `recall remove` tombstones a session so hook/backfill won't resurrect it
   (undo: `recall recap <transcript> --force`).
+- Handoff cards are a few KB each and auto-pruned after 30 days; long-term memory
+  lives in the recap cards. A session resumed via `recall open` gets its handoff
+  re-injected automatically — it wakes up knowing its next steps.
 - Pairs well with [codbash](https://www.npmjs.com/package/codbash-app) as full-text
   fallback and web dashboard; not required.
 

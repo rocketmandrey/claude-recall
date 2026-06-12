@@ -9,8 +9,11 @@ were doing, inspect its recap card, and act on it three ways:
   spawn    — open a new terminal window with the session   (recall open)
 
 Data lives in ~/.claude/session-recaps/ (override: RECALL_DATA):
-  INDEX.md   one line per session  — the single searchable touchpoint
-  <id>.md    recap card: task, status, method, entities, artifacts, next
+  INDEX.md        one line per session — the single searchable touchpoint
+  <id>.md         recap card: task, status, method, entities, artifacts, next
+  handoffs/<id>.md  in-flight state card, written before compaction / at session
+                    end; re-injected on SessionStart(compact|resume) so a session
+                    wakes up knowing exactly where it left off
 """
 import fcntl
 import glob
@@ -20,7 +23,7 @@ import re
 import subprocess
 import sys
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 DATA = os.environ.get("RECALL_DATA", os.path.expanduser("~/.claude/session-recaps"))
 MODEL = os.environ.get("RECALL_MODEL", "claude-haiku-4-5-20251001")
 MIN_EVENTS = int(os.environ.get("RECALL_MIN_EVENTS", "15"))
@@ -28,6 +31,8 @@ PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
 RECAP_MARKER = "SESSION-RECAP-WORKER"  # recap worker sessions carry it; never recap them
 LOG = "/tmp/recall.log"
 REMOVED = os.path.join(DATA, ".removed")  # id8 per line; recap/backfill skip these
+HANDOFFS = os.path.join(DATA, "handoffs")
+HANDOFF_DAYS = int(os.environ.get("RECALL_HANDOFF_DAYS", "30"))
 
 # fallback dirs only — appended, so the user's PATH order always wins
 for d in ("~/.npm-global/bin", "/opt/homebrew/bin", "/usr/local/bin", "~/.local/bin"):
@@ -82,13 +87,21 @@ def parse_transcript(path):
             "user_msgs": user_msgs, "ai_texts": ai_texts}
 
 
-def build_digest(t):
+def build_digest(t, tail=False):
     cut = lambda s, k: s[:k] + ("…" if len(s) > k else "")
     parts = [f"Project (cwd): {t['cwd']}", f"Span: {t['first_ts']} -> {t['last_ts']}, events: {t['n']}"]
     if t["skills"]:
         parts.append("Skills invoked: " + ", ".join(t["skills"]))
     if t["urls"]:
         parts.append("URLs in replies: " + " ".join(t["urls"]))
+    if tail:  # handoff: the end of the session is what matters
+        parts.append("\n-- FIRST USER REQUESTS --")
+        parts += [cut(m, 400) for m in t["user_msgs"][:3]]
+        parts.append("\n-- LAST USER REQUESTS --")
+        parts += [cut(m, 400) for m in t["user_msgs"][-6:]]
+        parts.append("\n-- LAST ASSISTANT REPLIES --")
+        parts += [cut(m, 600) for m in t["ai_texts"][-8:]]
+        return cut("\n".join(parts), 14000)
     parts.append("\n-- FIRST USER REQUESTS --")
     parts += [cut(m, 500) for m in t["user_msgs"][:5]]
     if len(t["user_msgs"]) > 7:
@@ -101,6 +114,14 @@ def build_digest(t):
 
 # ── recap generation ────────────────────────────────────────────────────
 
+def run_claude(prompt):
+    r = subprocess.run(["claude", "-p", prompt, "--model", MODEL],
+                       capture_output=True, text=True, timeout=180, cwd=DATA)
+    if r.returncode != 0:
+        raise RuntimeError(f"claude -p failed: {r.stderr[:300]}")
+    return re.sub(r"^```[a-z]*\n?|\n?```$", "", r.stdout.strip()).strip()
+
+
 def call_llm(digest):
     prompt = f"""[{RECAP_MARKER}] Generate a recap card for an AI coding session. Output strict YAML only — no markdown fences, no commentary. Write task/method/next in the SAME language the session itself is in. Fields:
 task: one line — what the task was (concretely: who/what/for whom)
@@ -112,11 +133,7 @@ next: what remains to be done, one line; null if complete
 
 Session digest:
 {digest}"""
-    r = subprocess.run(["claude", "-p", prompt, "--model", MODEL],
-                       capture_output=True, text=True, timeout=180, cwd=DATA)
-    if r.returncode != 0:
-        raise RuntimeError(f"claude -p failed: {r.stderr[:300]}")
-    return re.sub(r"^```(yaml)?\n?|\n?```$", "", r.stdout.strip()).strip()
+    return run_claude(prompt)
 
 
 def index_line(session_id, t, yaml_text):
@@ -169,6 +186,77 @@ def cmd_recap(transcript, force=False):
                 f"messages: {t['n']}\n{yaml_text}\n---\n")
     update_index(session_id, index_line(session_id, t, yaml_text))
     print(f"ok {session_id[:8]}")
+
+
+# ── handoff layer (continuity across compaction / resume) ──────────────
+
+def cmd_handoff(transcript):
+    import time
+    os.makedirs(HANDOFFS, exist_ok=True)
+    session_id = os.path.basename(transcript).replace(".jsonl", "")
+    t = parse_transcript(transcript)
+    if t is None:
+        print(f"skip {session_id[:8]} (empty or recap-worker session)")
+        return
+    prompt = f"""[{RECAP_MARKER}] Write a HANDOFF for an AI coding session that is about to be context-compacted (or has just ended). The session's next context window reads it to continue seamlessly. Output plain markdown, no fences, max 25 lines, in the SAME language the session is in. Keep these exact bold section headers:
+**Task now:** one line — what is being worked on right now
+**Done:** 3-6 bullets of completed work (concrete: file paths, URLs, commands)
+**In flight:** what is mid-flight (files being edited, uncommitted changes, running processes); "-" if none
+**Next:** numbered exact next steps
+**Gotchas:** pitfalls discovered this session; "-" if none
+
+Session digest:
+{build_digest(t, tail=True)}"""
+    text = run_claude(prompt)
+    path = os.path.join(HANDOFFS, f"{session_id}.md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"# Session handoff (auto-written before last compact / at session end)\n"
+                f"id: {session_id} | project: {t['cwd']} | updated: {time.strftime('%Y-%m-%d %H:%M')}\n\n"
+                f"{text}\n")
+    print(f"handoff {session_id[:8]} -> {path}")
+
+
+def prune_handoffs(days=HANDOFF_DAYS):
+    import time
+    cutoff = time.time() - days * 86400
+    for p in glob.glob(os.path.join(HANDOFFS, "*.md")):
+        if os.path.getmtime(p) < cutoff:
+            os.remove(p)
+
+
+def cmd_handoff_hook():
+    """PreCompact entrypoint: synchronous — the handoff must exist before the
+    post-compact SessionStart fires. Never blocks compaction on error."""
+    try:
+        transcript = json.load(sys.stdin).get("transcript_path", "")
+    except Exception:
+        return
+    if not os.path.isfile(transcript):
+        return
+    with open(transcript, errors="replace") as f:
+        if sum(1 for _ in f) < MIN_EVENTS:
+            return
+    try:
+        cmd_handoff(transcript)
+        prune_handoffs()
+    except Exception as e:
+        with open(LOG, "a") as log:
+            log.write(f"handoff-hook: {e}\n")
+
+
+def cmd_restore_hook():
+    """SessionStart(compact|resume) entrypoint: stdout becomes session context."""
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:
+        return
+    ids = [payload.get("session_id", ""),
+           os.path.basename(payload.get("transcript_path", "")).replace(".jsonl", "")]
+    for sid in ids:
+        path = os.path.join(HANDOFFS, f"{sid}.md")
+        if sid and os.path.isfile(path):
+            sys.stdout.write(open(path, encoding="utf-8").read())
+            return
 
 
 # ── card lookup ─────────────────────────────────────────────────────────
@@ -257,8 +345,9 @@ def cmd_hook():
         if sum(1 for _ in f) < MIN_EVENTS:
             return
     with open(LOG, "a") as log:
-        subprocess.Popen([sys.executable, os.path.abspath(__file__), "recap", transcript],
-                         stdout=log, stderr=log, start_new_session=True)
+        for sub in ("recap", "handoff"):  # handoff too: a spawn-resumed session wakes up informed
+            subprocess.Popen([sys.executable, os.path.abspath(__file__), sub, transcript],
+                             stdout=log, stderr=log, start_new_session=True)
 
 
 def cmd_backfill(days=180, min_events=25, jobs=4):
@@ -295,7 +384,11 @@ def cmd_doctor():
     settings = os.path.expanduser("~/.claude/settings.json")
     stext = open(settings, encoding="utf-8").read() if os.path.exists(settings) else ""
     good &= ok("recall hook" in stext, "SessionEnd hook registered in ~/.claude/settings.json")
+    good &= ok("recall handoff-hook" in stext, "PreCompact handoff hook registered")
+    good &= ok("recall restore-hook" in stext, "SessionStart restore hook registered")
     ok("Bash(recall" in stext, "permissions: recall allowed without prompts (Bash(recall *))")
+    n_h = len(glob.glob(os.path.join(HANDOFFS, "*.md")))
+    ok(True, f"handoffs: {n_h} live (auto-pruned after {HANDOFF_DAYS} days)")
     ok(shutil.which("codbash"), "codbash (optional full-text fallback + dashboard)")
     sys.exit(0 if good else 1)
 
@@ -318,12 +411,16 @@ USAGE = """recall {VERSION} — session memory & orchestration for Claude Code
   recall open <id8>             open the session in a new terminal window (spawn mode)
   recall remove <id8>           forget a session: card + index line + tombstone
   recall recap <file.jsonl>     recap one transcript [--force] (--force also un-removes)
+  recall handoff <file.jsonl>   write a handoff card (in-flight state) for a session
   recall backfill               recap existing sessions [--days N] [--min-events N] [--jobs N]
   recall hook                   SessionEnd hook entrypoint (reads JSON on stdin)
+  recall handoff-hook           PreCompact hook entrypoint (stdin JSON; sync)
+  recall restore-hook           SessionStart hook entrypoint (stdin JSON; prints handoff)
   recall index                  index stats
   recall doctor                 check installation
 
-env: RECALL_DATA, RECALL_MODEL, RECALL_TERMINAL (Terminal|iTerm), RECALL_MIN_EVENTS"""
+env: RECALL_DATA, RECALL_MODEL, RECALL_TERMINAL (Terminal|iTerm), RECALL_MIN_EVENTS,
+     RECALL_HANDOFF_DAYS (default 30 — handoff retention)"""
 
 
 def main():
@@ -347,8 +444,14 @@ def main():
     elif args[0] == "backfill":
         flag = lambda n, d: int(args[args.index(n) + 1]) if n in args else d
         cmd_backfill(flag("--days", 180), flag("--min-events", 25), flag("--jobs", 4))
+    elif args[0] == "handoff" and len(args) > 1:
+        cmd_handoff(args[1])
     elif args[0] == "hook":
         cmd_hook()
+    elif args[0] == "handoff-hook":
+        cmd_handoff_hook()
+    elif args[0] == "restore-hook":
+        cmd_restore_hook()
     elif args[0] == "index":
         cmd_index()
     elif args[0] == "doctor":

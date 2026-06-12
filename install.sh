@@ -30,28 +30,45 @@ mkdir -p "$SKILL_DIR"
 cp "$REPO_DIR/skill/SKILL.md" "$SKILL_DIR/SKILL.md"
 echo "  ✓ skill -> $SKILL_DIR"
 
-# 3. SessionEnd hook + permissions (merge into settings.json, idempotent)
-python3 - "$SETTINGS" "$RECALL_HOME/bin/recall hook" <<'PY'
+# 3. Hooks (SessionEnd recap+handoff, PreCompact handoff, SessionStart restore)
+#    + permissions — merged into settings.json, idempotent, never overwrites yours
+python3 - "$SETTINGS" "$RECALL_HOME/bin/recall" <<'PY'
 import json, os, sys
-settings_path, hook_cmd = sys.argv[1], sys.argv[2]
+settings_path, rbin = sys.argv[1], sys.argv[2]
 settings = {}
 if os.path.exists(settings_path):
     settings = json.load(open(settings_path))
 hooks = settings.setdefault("hooks", {})
-entries = hooks.setdefault("SessionEnd", [])
-# drop stale recall/session-recap hooks, keep everything else
-def is_ours(entry):
-    return any("recall hook" in h.get("command", "") or "session_end_hook.sh" in h.get("command", "")
-               for h in entry.get("hooks", []) if h.get("type") == "command")
-entries[:] = [e for e in entries if not is_ours(e)]
-entries.append({"hooks": [{"type": "command", "command": hook_cmd, "timeout": 15}]})
-# permissions: let any session run recall without a prompt
+
+def scrub(event, *needles):
+    """Drop our stale entries for this event, keep everything else."""
+    entries = hooks.setdefault(event, [])
+    def ours(e):
+        return any(any(n in h.get("command", "") for n in needles)
+                   for h in e.get("hooks", []) if h.get("type") == "command")
+    entries[:] = [e for e in entries if not ours(e)]
+    return entries
+
+ends = scrub("SessionEnd", "recall hook", "session_end_hook.sh")
+ends.append({"hooks": [{"type": "command", "command": f"{rbin} hook", "timeout": 15}]})
+
+pre = scrub("PreCompact", "recall handoff-hook")
+for m in ("auto", "manual"):
+    pre.append({"matcher": m, "hooks": [{"type": "command",
+                "command": f"{rbin} handoff-hook", "timeout": 120}]})
+
+ss = scrub("SessionStart", "recall restore-hook")
+for m in ("compact", "resume"):
+    ss.append({"matcher": m, "hooks": [{"type": "command",
+               "command": f"{rbin} restore-hook", "timeout": 10}]})
+
 allow = settings.setdefault("permissions", {}).setdefault("allow", [])
 for rule in ("Bash(recall)", "Bash(recall *)"):
     if rule not in allow:
         allow.append(rule)
+
 json.dump(settings, open(settings_path, "w"), indent=2, ensure_ascii=False)
-print("  ✓ SessionEnd hook + permissions (Bash(recall *)) -> " + settings_path)
+print("  ✓ hooks (SessionEnd, PreCompact, SessionStart) + permissions -> " + settings_path)
 PY
 
 # 4. Verify
