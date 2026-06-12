@@ -23,7 +23,7 @@ import re
 import subprocess
 import sys
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 DATA = os.environ.get("RECALL_DATA", os.path.expanduser("~/.claude/session-recaps"))
 MODEL = os.environ.get("RECALL_MODEL", "claude-haiku-4-5-20251001")
 MIN_EVENTS = int(os.environ.get("RECALL_MIN_EVENTS", "15"))
@@ -299,7 +299,47 @@ def cmd_find(terms):
         sys.exit("recall: no index yet — run `recall backfill` first")
     hits = [l for l in open(idx, encoding="utf-8") if pat.search(l)]
     hits.sort(key=lambda l: l.split()[1] if len(l.split()) > 1 else "", reverse=True)
-    print("".join(hits) or f"no matches in index; fallback: codbash search \"{' '.join(terms)}\"")
+    print("".join(hits) or "no matches in index; try other word stems, or full-text:\n"
+          f"  recall grep {' '.join(terms)}")
+
+
+def cmd_grep(terms):
+    """Full-text fallback over raw transcripts — a minimal nod to codbash."""
+    import shutil
+    import time
+    pats = [x for t in terms for x in ("-e", t)]
+    if shutil.which("rg"):  # ripgrep if available: ~10x faster on GBs of transcripts
+        r = subprocess.run(["rg", "-liF", "--no-messages", "-g", "*.jsonl",
+                            "-g", "!agent-*"] + pats + [PROJECTS_DIR],
+                           capture_output=True, text=True)
+        files = r.stdout.splitlines()
+    else:  # parallel grep across cores
+        paths = subprocess.run(["find", PROJECTS_DIR, "-name", "*.jsonl",
+                                "!", "-name", "agent-*", "-print0"],
+                               capture_output=True, text=True).stdout
+        r = subprocess.run(["xargs", "-0", "-P", str(os.cpu_count() or 4), "-n", "32",
+                            "grep", "-liF"] + pats, input=paths,
+                           capture_output=True, text=True)
+        files = r.stdout.splitlines()
+    if not files:
+        sys.exit(f"recall: no full-text matches for: {' '.join(terms)}")
+    files.sort(key=os.path.getmtime, reverse=True)
+    pat = re.compile("|".join(re.escape(t) for t in terms), re.I)
+    grep1 = lambda args, path: subprocess.run(["grep", "-m1"] + args + [path],
+                                              capture_output=True, text=True).stdout
+    for path in files[:15]:
+        sid = os.path.basename(path).replace(".jsonl", "")[:8]
+        date = time.strftime("%Y-%m-%d", time.localtime(os.path.getmtime(path)))
+        m = re.search(r'"cwd":\s*"([^"]+)"', grep1(['"cwd"'], path))
+        proj = os.path.basename(m.group(1).rstrip("/")) if m else "?"
+        line = grep1(["-iF"] + [x for t in terms for x in ("-e", t)], path)
+        m, snippet = pat.search(line), ""
+        if m:
+            s = max(0, m.start() - 60)
+            snippet = line[s:m.end() + 80].replace("\\n", " ").replace('\\"', '"')
+        print(f"{sid} {date} {proj} … {snippet.strip()} …")
+    if len(files) > 15:
+        print(f"(+{len(files) - 15} more sessions matched)")
 
 
 def cmd_open(id_prefix):
@@ -402,7 +442,6 @@ def cmd_doctor():
         ok(True, f"handoff loop: ON — {n_h} live handoffs (auto-pruned after {HANDOFF_DAYS} days)")
     else:
         ok(True, "handoff loop: off (optional — enable: ./install.sh --with-handoff)")
-    ok(shutil.which("codbash"), "codbash (optional full-text fallback + dashboard)")
     sys.exit(0 if good else 1)
 
 
@@ -419,6 +458,7 @@ def cmd_index():
 USAGE = """recall {VERSION} — session memory & orchestration for Claude Code
 
   recall find <query...>        search the index (case-insensitive, OR)
+  recall grep <query...>        full-text search raw transcripts (fallback when index is silent)
   recall show <id8>             print a session's recap card
   recall cmd <id8>              print the resume command (handoff mode)
   recall open <id8>             open the session in a new terminal window (spawn mode)
@@ -444,6 +484,8 @@ def main():
         print(VERSION)
     elif args[0] in ("find", "search") and len(args) > 1:
         cmd_find(args[1:])
+    elif args[0] == "grep" and len(args) > 1:
+        cmd_grep(args[1:])
     elif args[0] == "show" and len(args) > 1:
         print(card_meta(resolve_card(args[1]))["text"])
     elif args[0] == "cmd" and len(args) > 1:

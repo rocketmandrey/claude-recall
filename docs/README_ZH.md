@@ -107,6 +107,7 @@ claude-recall/
 | 命令 | 功能 |
 |------|------|
 | `recall find <查询...>` | 搜索索引（不区分大小写，OR；按词干搜索） |
+| `recall grep <查询...>` | 对原始转录文件全文检索（索引无结果时的后备） |
 | `recall show <id8>` | 打印会话的 recap 卡片 |
 | `recall cmd <id8>` | 打印恢复命令（handoff） |
 | `recall open <id8>` | 在新终端窗口打开会话（spawn） |
@@ -132,15 +133,16 @@ haiku）、`RECALL_TERMINAL`（`Terminal`\|`iTerm`）、`RECALL_MIN_EVENTS`（�
   （撤销：`recall recap <transcript> --force`）。
 - handoff 卡片（如已启用循环）每个仅几 KB，30 天后自动清理；长期记忆存于 recap
   卡片。通过 `recall open` 恢复的会话会自动收到自己的 handoff——醒来即知下一步。
-- 与 Valerii Kovalskii 的 [codbash](https://github.com/vakovalskii/codbash) 搭配
-  使用效果更佳（全文检索 + 网页仪表盘）——如已安装，recall 会自动集成；二者不共享
-  代码，也非必需。
+- 如索引无结果，`recall grep` 会对 `~/.claude/projects/` 中的原始转录文件做全文
+  检索——无需任何额外工具。
 
 ## 致谢
 
 recall 源于对 Valerii Kovalskii 的 [codbash](https://github.com/vakovalskii/codbash)
-（Claude Code / Codex 会话仪表盘 + 全文检索）的日常使用。recall 不包含 codbash 的
-任何代码；但如已安装，编排 skill 会将其用作全文检索后备。Respect, Valera!
+（AI 编码会话仪表盘 + 全文检索）的日常使用。recall 不包含其任何代码、也不依赖它，
+但"把过去的会话当作可检索资产"这一理念正来自与 codbash 共处的日子；`recall grep`
+则是对 codbash 完整能力（网页仪表盘、跨智能体会话同步）的刻意极简致敬。想要完整
+体验，请安装 codbash。Respect, Valera!
 
 ## 许可证
 

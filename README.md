@@ -4,7 +4,7 @@
 
 ![Claude Code](https://img.shields.io/badge/Claude_Code-skill+CLI-orange?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)
-![Version](https://img.shields.io/badge/version-0.3.1-blue?style=flat-square)
+![Version](https://img.shields.io/badge/version-0.3.2-blue?style=flat-square)
 ![Zero deps](https://img.shields.io/badge/dependencies-0-blue?style=flat-square)
 ![macOS](https://img.shields.io/badge/platform-macOS-lightgrey?style=flat-square)
 
@@ -130,6 +130,7 @@ claude-recall/
 | command | what it does |
 |---------|--------------|
 | `recall find <query...>` | search the index (case-insensitive OR; search by word STEM) |
+| `recall grep <query...>` | full-text search across raw transcripts (fallback when the index is silent) |
 | `recall show <id8>` | print a session's recap card |
 | `recall cmd <id8>` | print the resume command (handoff) |
 | `recall open <id8>` | open the session in a new terminal window (spawn) |
@@ -156,16 +157,17 @@ Env: `RECALL_DATA` (default `~/.claude/session-recaps`), `RECALL_MODEL` (default
   30 days; long-term memory lives in the recap cards. A session resumed via
   `recall open` gets its handoff re-injected automatically — it wakes up knowing
   its next steps.
-- Pairs well with [codbash](https://github.com/vakovalskii/codbash) by Valerii
-  Kovalskii as full-text fallback and web dashboard — recall integrates with it
-  if installed, but shares no code with it and doesn't require it.
+- If the index draws a blank, `recall grep` does full-text search over your raw
+  transcripts in `~/.claude/projects/` — no extra tools needed.
 
 ## Acknowledgements
 
 recall grew out of daily use of [codbash](https://github.com/vakovalskii/codbash) by
-Valerii Kovalskii — a dashboard + full-text search across Claude Code / Codex sessions.
-recall contains none of codbash's code, but if codbash is installed, the orchestrator
-skill falls back to it for full-text search. Respect, Valera.
+Valerii Kovalskii — a dashboard + full-text search across AI coding sessions. recall
+contains none of its code and doesn't depend on it, but the idea of treating past
+sessions as a searchable asset comes from living with codbash, and `recall grep` is
+a deliberately minimal nod to what codbash does at full scale (web dashboard,
+cross-agent session sync). For the full experience, get codbash. Respect, Valera.
 
 ## License
 
