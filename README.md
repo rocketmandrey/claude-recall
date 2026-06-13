@@ -4,7 +4,7 @@
 
 ![Claude Code](https://img.shields.io/badge/Claude_Code-skill+CLI-orange?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)
-![Version](https://img.shields.io/badge/version-0.4.1-blue?style=flat-square)
+![Version](https://img.shields.io/badge/version-0.5.0-blue?style=flat-square)
 ![Zero deps](https://img.shields.io/badge/dependencies-0-blue?style=flat-square)
 ![macOS](https://img.shields.io/badge/platform-macOS-lightgrey?style=flat-square)
 
@@ -141,10 +141,11 @@ claude-recall/
 | `recall grep <query...>` | full-text search across raw transcripts (fallback when the index is silent) |
 | `recall show <id8>` | print a session's recap card |
 | `recall cmd <id8>` | print the resume command (handoff) |
-| `recall open <id8>` | open the session in a new terminal window (spawn) |
+| `recall open <id8> [--fast]` | open the session in a new terminal window (spawn); writes its missing handoff card first unless `--fast` |
 | `recall remove <id8>` | forget a session: card + index line + tombstone |
 | `recall rename <id8> <title...>` | set a session's display name by hand (auto-naming then leaves it alone) |
 | `recall handoff <file.jsonl>` | write a handoff card (in-flight state) for a session |
+| `recall handoff --all` | retro-sweep: handoff cards for recent sessions lacking one `[--days N] [--jobs N]` |
 | `recall backfill` | index existing sessions `[--days N] [--min-events N] [--jobs N]` |
 | `recall index` | index stats |
 | `recall doctor` | check installation |
@@ -166,7 +167,8 @@ Env: `RECALL_DATA` (default `~/.claude/session-recaps`), `RECALL_MODEL` (default
 - Handoff cards (if the loop is enabled) are a few KB each and auto-pruned after
   30 days; long-term memory lives in the recap cards. A session resumed via
   `recall open` gets its handoff re-injected automatically — it wakes up knowing
-  its next steps.
+  its next steps. Older sessions without a card get one written on open (~30s;
+  `--fast` to skip), or retro-sweep them all: `recall handoff --all --days 14`.
 - If the index draws a blank, `recall grep` does full-text search over your raw
   transcripts in `~/.claude/projects/` — no extra tools needed.
 

@@ -23,7 +23,7 @@ import re
 import subprocess
 import sys
 
-VERSION = "0.4.1"
+VERSION = "0.5.0"
 DATA = os.environ.get("RECALL_DATA", os.path.expanduser("~/.claude/session-recaps"))
 MODEL = os.environ.get("RECALL_MODEL", "claude-haiku-4-5-20251001")
 MIN_EVENTS = int(os.environ.get("RECALL_MIN_EVENTS", "15"))
@@ -181,8 +181,8 @@ def cmd_recap(transcript, force=False):
             # title already-recapped sessions from their card — no LLM call
             meta = card_meta(card_path)
             m = re.search(r"^task:\s*(.+)$", meta["text"], re.M)
-            if m and apply_title(transcript, session_title(meta["project"], m.group(1))):
-                os.utime(card_path)  # keep card newer than the transcript we just touched
+            if m:
+                apply_title(transcript, session_title(meta["project"], m.group(1)))
         print(f"skip {session_id[:8]} (up to date)")
         return
     t = parse_transcript(transcript)
@@ -250,6 +250,9 @@ def apply_title(transcript, title, manual=False):
     for p, d in registry_entries(session_id):
         d["name"] = title
         json.dump(d, open(p, "w", encoding="utf-8"), ensure_ascii=False)
+    card = os.path.join(DATA, f"{session_id}.md")
+    if os.path.exists(card):
+        os.utime(card)  # we just touched the transcript; keep the card "up to date"
     with open(AUTONAMED, "a+", encoding="utf-8") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         f.seek(0)
@@ -317,6 +320,54 @@ def prune_handoffs(days=HANDOFF_DAYS):
     for p in glob.glob(os.path.join(HANDOFFS, "*.md")):
         if os.path.getmtime(p) < cutoff:
             os.remove(p)
+
+
+def last_activity(path):
+    """Epoch of the transcript's last real event. File mtime lies here: recall
+    itself appends title records to old transcripts, bumping their mtime — so
+    a --days filter on mtime would resurrect ancient sessions. Event timestamps
+    can't lie: our appended records carry none."""
+    from datetime import datetime
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 65536))
+            tail = f.read().decode("utf-8", errors="replace")
+        stamps = re.findall(r'"timestamp"\s*:\s*"([^"]+)"', tail)
+        if stamps:
+            return datetime.fromisoformat(stamps[-1].replace("Z", "+00:00")).timestamp()
+    except (OSError, ValueError):
+        pass
+    return os.path.getmtime(path)
+
+
+def cmd_handoff_all(days=14, jobs=4):
+    """Retro-sweep: write handoff cards for recent sessions that lack one."""
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+    cutoff = time.time() - days * 86400
+    removed, targets = removed_ids(), []
+    for path in glob.glob(os.path.join(PROJECTS_DIR, "*", "*.jsonl")):
+        sid = os.path.basename(path).replace(".jsonl", "")
+        # mtime only ever overstates recency — cheap reject before reading the tail
+        if sid.startswith("agent-") or os.path.getmtime(path) < cutoff:
+            continue
+        if sid[:8] in removed or os.path.exists(os.path.join(HANDOFFS, f"{sid}.md")):
+            continue
+        if last_activity(path) < cutoff:
+            continue
+        with open(path, errors="replace") as f:
+            if sum(1 for _ in f) >= MIN_EVENTS:
+                targets.append(path)
+    print(f"handoff backfill: {len(targets)} sessions (days<={days}, jobs={jobs}, "
+          f"one haiku call each)", flush=True)
+    with ThreadPoolExecutor(max_workers=jobs) as ex:
+        for fut in [ex.submit(cmd_handoff, t) for t in targets]:
+            try:
+                fut.result()
+            except Exception as e:
+                print(f"error: {e}", file=sys.stderr)
+    print("handoff backfill done")
 
 
 def cmd_handoff_hook():
@@ -428,8 +479,18 @@ def cmd_grep(terms):
         print(f"(+{len(files) - 15} more sessions matched)")
 
 
-def cmd_open(id_prefix):
-    shell_cmd = resume_command(id_prefix)
+def cmd_open(id_prefix, fast=False):
+    m = card_meta(resolve_card(id_prefix))
+    if not fast and not os.path.exists(os.path.join(HANDOFFS, f"{m['id']}.md")):
+        tr = glob.glob(os.path.join(PROJECTS_DIR, "*", f"{m['id']}.jsonl"))
+        if tr:
+            print("no handoff card — writing one so the session wakes up informed "
+                  "(~30s, one haiku call; skip with --fast)")
+            try:
+                cmd_handoff(tr[0])
+            except Exception as e:
+                print(f"  handoff failed ({e}) — opening anyway")
+    shell_cmd = f'cd "{m["project"]}" && claude --resume {m["id"]}'
     term = os.environ.get("RECALL_TERMINAL", "Terminal")
     esc = shell_cmd.replace("\\", "\\\\").replace('"', '\\"')
     if term.lower() == "iterm":
@@ -497,10 +558,13 @@ def cmd_backfill(days=180, min_events=25, jobs=4):
         name = os.path.basename(path)
         if name.startswith("agent-") or os.path.getmtime(path) < cutoff:
             continue
+        if last_activity(path) < cutoff:
+            continue
         with open(path, errors="replace") as f:
             if sum(1 for _ in f) >= min_events:
                 targets.append(path)
-    print(f"backfill: {len(targets)} sessions (days<={days}, events>={min_events}, jobs={jobs})")
+    print(f"backfill: {len(targets)} sessions (days<={days}, events>={min_events}, jobs={jobs})",
+          flush=True)
     with ThreadPoolExecutor(max_workers=jobs) as ex:
         for fut in [ex.submit(cmd_recap, t) for t in targets]:
             try:
@@ -547,11 +611,14 @@ USAGE = """recall {VERSION} — session memory & orchestration for Claude Code
   recall grep <query...>        full-text search raw transcripts (fallback when index is silent)
   recall show <id8>             print a session's recap card
   recall cmd <id8>              print the resume command (handoff mode)
-  recall open <id8>             open the session in a new terminal window (spawn mode)
+  recall open <id8> [--fast]    open in a new terminal window (spawn); writes the
+                                session's missing handoff card first unless --fast
   recall remove <id8>           forget a session: card + index line + tombstone
   recall rename <id8> <title>   set a session's display name by hand (auto-naming then leaves it alone)
   recall recap <file.jsonl>     recap one transcript [--force] (--force also un-removes)
   recall handoff <file.jsonl>   write a handoff card (in-flight state) for a session
+  recall handoff --all          retro-sweep: handoffs for recent sessions lacking one
+                                [--days N (14)] [--jobs N (4)]
   recall backfill               recap existing sessions [--days N] [--min-events N] [--jobs N]
   recall hook                   SessionEnd hook entrypoint (reads JSON on stdin)
   recall handoff-hook           PreCompact hook entrypoint (stdin JSON; sync)
@@ -579,7 +646,7 @@ def main():
     elif args[0] == "cmd" and len(args) > 1:
         print(resume_command(args[1]))
     elif args[0] == "open" and len(args) > 1:
-        cmd_open(args[1])
+        cmd_open(args[1], fast="--fast" in args)
     elif args[0] in ("remove", "rm", "forget") and len(args) > 1:
         cmd_remove(args[1])
     elif args[0] == "rename" and len(args) > 2:
@@ -590,7 +657,11 @@ def main():
         flag = lambda n, d: int(args[args.index(n) + 1]) if n in args else d
         cmd_backfill(flag("--days", 180), flag("--min-events", 25), flag("--jobs", 4))
     elif args[0] == "handoff" and len(args) > 1:
-        cmd_handoff(args[1])
+        if args[1] == "--all":
+            flag = lambda n, d: int(args[args.index(n) + 1]) if n in args else d
+            cmd_handoff_all(flag("--days", 14), flag("--jobs", 4))
+        else:
+            cmd_handoff(args[1])
     elif args[0] == "hook":
         cmd_hook()
     elif args[0] == "handoff-hook":

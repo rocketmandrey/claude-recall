@@ -117,10 +117,11 @@ claude-recall/
 | `recall grep <查询...>` | 对原始转录文件全文检索（索引无结果时的后备） |
 | `recall show <id8>` | 打印会话的 recap 卡片 |
 | `recall cmd <id8>` | 打印恢复命令（handoff） |
-| `recall open <id8>` | 在新终端窗口打开会话（spawn） |
+| `recall open <id8> [--fast]` | 在新终端窗口打开会话（spawn）；如缺少 handoff 卡片会先生成（`--fast` 跳过） |
 | `recall remove <id8>` | 遗忘会话：卡片 + 索引行 + 墓碑标记 |
 | `recall rename <id8> <标题...>` | 手动设置会话显示名（自动命名不再触碰它） |
 | `recall handoff <file.jsonl>` | 为会话写入 handoff 卡片（进行中状态） |
+| `recall handoff --all` | 回扫：为缺少卡片的近期会话补写 `[--days N] [--jobs N]` |
 | `recall backfill` | 索引现有会话 `[--days N] [--min-events N] [--jobs N]` |
 | `recall index` | 索引统计 |
 | `recall doctor` | 检查安装 |
@@ -142,6 +143,8 @@ haiku）、`RECALL_TERMINAL`（`Terminal`\|`iTerm`）、`RECALL_MIN_EVENTS`（�
   （撤销：`recall recap <transcript> --force`）。
 - handoff 卡片（如已启用循环）每个仅几 KB，30 天后自动清理；长期记忆存于 recap
   卡片。通过 `recall open` 恢复的会话会自动收到自己的 handoff——醒来即知下一步。
+  没有卡片的旧会话会在打开时现场生成（约 30 秒；`--fast` 跳过），或一次性回扫：
+  `recall handoff --all --days 14`。
 - 如索引无结果，`recall grep` 会对 `~/.claude/projects/` 中的原始转录文件做全文
   检索——无需任何额外工具。
 
