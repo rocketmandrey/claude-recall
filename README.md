@@ -172,11 +172,14 @@ Env: `RECALL_DATA` (default `~/.claude/session-recaps`), `RECALL_MODEL` (default
   `--fast` to skip), or retro-sweep them all: `recall handoff --all --days 14`.
 - If the index draws a blank, `recall grep` does full-text search over your raw
   transcripts in `~/.claude/projects/` — no extra tools needed.
-- Tabs: in iTerm `recall open --tab` is native and reliable. Terminal.app has no
-  tab API, so recall emulates ⌘T via System Events (best-effort: needs the
-  Accessibility permission, and scripted ⌘T can still be dropped depending on
-  focus) — it verifies a tab actually appeared and otherwise opens a window, so
-  it never injects the command into a busy tab. For guaranteed tabs, use iTerm.
+- Tabs: in iTerm `recall open --tab` is native and reliable, and each tab is
+  **colored by project** (iTerm OSC-6) so a vertical tab bar groups same-project
+  sessions by stripe — put the tab bar on the left via iTerm → Settings →
+  Appearance → Tab bar location. Terminal.app has no tab API, so recall emulates
+  ⌘T via System Events (best-effort: needs the Accessibility permission, and
+  scripted ⌘T can still be dropped depending on focus) — it verifies a tab
+  actually appeared and otherwise opens a window, so it never injects the command
+  into a busy tab. For guaranteed, color-coded tabs, use iTerm.
 
 ## Acknowledgements
 

@@ -23,7 +23,7 @@ import re
 import subprocess
 import sys
 
-VERSION = "0.5.2"
+VERSION = "0.5.3"
 DATA = os.environ.get("RECALL_DATA", os.path.expanduser("~/.claude/session-recaps"))
 MODEL = os.environ.get("RECALL_MODEL", "claude-haiku-4-5-20251001")
 MIN_EVENTS = int(os.environ.get("RECALL_MIN_EVENTS", "15"))
@@ -491,23 +491,55 @@ def cmd_open(id_prefix, fast=False, tab=False):
             except Exception as e:
                 print(f"  handoff failed ({e}) — opening anyway")
     shell_cmd = f'cd "{m["project"]}" && claude --resume {m["id"]}'
-    open_in_terminal(shell_cmd, tab=tab)
+    open_in_terminal(shell_cmd, tab=tab, project=m["project"])
 
 
-def open_in_terminal(shell_cmd, tab=False):
+# distinct, readable tab colors — same project always lands on the same one,
+# so iTerm's left tab bar shows a colored stripe per project (visual grouping)
+TAB_PALETTE = [
+    (224, 108, 94),   # coral
+    (224, 160, 76),   # amber
+    (207, 196, 74),   # gold
+    (111, 184, 85),   # green
+    (79, 179, 168),   # teal
+    (90, 143, 224),   # blue
+    (155, 111, 214),  # violet
+    (214, 111, 173),  # magenta
+]
+
+
+def tab_color(project):
+    import zlib
+    return TAB_PALETTE[zlib.crc32((project or "").encode()) % len(TAB_PALETTE)]
+
+
+def iterm_color_prefix(project):
+    """iTerm OSC 6: paint the tab by project so the left bar groups visually."""
+    if not project:
+        return ""
+    r, g, b = tab_color(project)
+    return (f"printf '\\033]6;1;bg;red;brightness;{r}\\a"
+            f"\\033]6;1;bg;green;brightness;{g}\\a"
+            f"\\033]6;1;bg;blue;brightness;{b}\\a'; ")
+
+
+def open_in_terminal(shell_cmd, tab=False, project=None):
     term = os.environ.get("RECALL_TERMINAL", "Terminal")
-    esc = shell_cmd.replace("\\", "\\\\").replace('"', '\\"')
     if term.lower() == "iterm":
         # iTerm tabs are first-class AppleScript citizens; fall back to a
-        # window when there is no window to put a tab in
+        # window when there is no window to put a tab in. Prefix an OSC-6
+        # color so same-project tabs share a stripe in the vertical tab bar.
+        esc = (iterm_color_prefix(project) + shell_cmd).replace(
+            "\\", "\\\\").replace('"', '\\"')
         mk = ('try\ntell current window to create tab with default profile\n'
               'on error\ncreate window with default profile\nend try'
               if tab else 'create window with default profile')
         script = (f'tell application "iTerm"\nactivate\n{mk}\n'
                   f'tell current session of current window to write text "{esc}"\nend tell')
         subprocess.run(["osascript", "-e", script], check=True, capture_output=True)
-        print(f"opened in iTerm {'tab' if tab else 'window'}: {shell_cmd}")
+        print(f"opened in iTerm {'tab' if tab else 'window'} (color by project): {shell_cmd}")
         return
+    esc = shell_cmd.replace("\\", "\\\\").replace('"', '\\"')
     if tab:
         # Terminal.app has no native "new tab" verb — emulate cmd+T via System
         # Events (needs the Accessibility permission). osascript's exit code is
