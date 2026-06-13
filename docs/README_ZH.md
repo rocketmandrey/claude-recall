@@ -117,7 +117,7 @@ claude-recall/
 | `recall grep <查询...>` | 对原始转录文件全文检索（索引无结果时的后备） |
 | `recall show <id8>` | 打印会话的 recap 卡片 |
 | `recall cmd <id8>` | 打印恢复命令（handoff） |
-| `recall open <id8> [--fast]` | 在新终端窗口打开会话（spawn）；如缺少 handoff 卡片会先生成（`--fast` 跳过） |
+| `recall open <id8> [--fast] [--tab]` | 在新终端窗口打开会话（spawn）；如缺少 handoff 卡片会先生成（`--fast` 跳过）；`--tab` 改为新标签页 |
 | `recall remove <id8>` | 遗忘会话：卡片 + 索引行 + 墓碑标记 |
 | `recall rename <id8> <标题...>` | 手动设置会话显示名（自动命名不再触碰它） |
 | `recall handoff <file.jsonl>` | 为会话写入 handoff 卡片（进行中状态） |
@@ -129,7 +129,8 @@ claude-recall/
 环境变量：`RECALL_DATA`（默认 `~/.claude/session-recaps`）、`RECALL_MODEL`（默认
 haiku）、`RECALL_TERMINAL`（`Terminal`\|`iTerm`）、`RECALL_MIN_EVENTS`（默认 15）、
 `RECALL_HANDOFF_DAYS`（默认 30 —— handoff 保留期）、
-`RECALL_AUTONAME`（默认 1 —— 会话自动命名；设 `0` 关闭）。
+`RECALL_AUTONAME`（默认 1 —— 会话自动命名；设 `0` 关闭）、
+`RECALL_TAB`（`1` —— `recall open` 默认开标签页；单次改窗口：`--window`）。
 
 ## 要求与说明
 
@@ -147,6 +148,9 @@ haiku）、`RECALL_TERMINAL`（`Terminal`\|`iTerm`）、`RECALL_MIN_EVENTS`（�
   `recall handoff --all --days 14`。
 - 如索引无结果，`recall grep` 会对 `~/.claude/projects/` 中的原始转录文件做全文
   检索——无需任何额外工具。
+- 标签页：iTerm 中 `recall open --tab` 原生支持；Terminal.app 无标签页 API，
+  recall 通过 System Events 模拟 ⌘T——需为 Terminal 授予辅助功能权限
+  （系统设置 → 隐私与安全性），否则回退为新窗口。
 
 ## 致谢
 

@@ -141,7 +141,7 @@ claude-recall/
 | `recall grep <query...>` | full-text search across raw transcripts (fallback when the index is silent) |
 | `recall show <id8>` | print a session's recap card |
 | `recall cmd <id8>` | print the resume command (handoff) |
-| `recall open <id8> [--fast]` | open the session in a new terminal window (spawn); writes its missing handoff card first unless `--fast` |
+| `recall open <id8> [--fast] [--tab]` | open the session in a new terminal window (spawn); writes its missing handoff card first unless `--fast`; `--tab` opens a tab instead |
 | `recall remove <id8>` | forget a session: card + index line + tombstone |
 | `recall rename <id8> <title...>` | set a session's display name by hand (auto-naming then leaves it alone) |
 | `recall handoff <file.jsonl>` | write a handoff card (in-flight state) for a session |
@@ -153,7 +153,8 @@ claude-recall/
 Env: `RECALL_DATA` (default `~/.claude/session-recaps`), `RECALL_MODEL` (default haiku),
 `RECALL_TERMINAL` (`Terminal`\|`iTerm`), `RECALL_MIN_EVENTS` (default 15),
 `RECALL_HANDOFF_DAYS` (default 30 — handoff retention),
-`RECALL_AUTONAME` (default 1 — auto-title sessions; `0` to disable).
+`RECALL_AUTONAME` (default 1 — auto-title sessions; `0` to disable),
+`RECALL_TAB` (`1` — `recall open` defaults to tabs; per-call override: `--window`).
 
 ## Requirements & notes
 
@@ -171,6 +172,9 @@ Env: `RECALL_DATA` (default `~/.claude/session-recaps`), `RECALL_MODEL` (default
   `--fast` to skip), or retro-sweep them all: `recall handoff --all --days 14`.
 - If the index draws a blank, `recall grep` does full-text search over your raw
   transcripts in `~/.claude/projects/` — no extra tools needed.
+- Tabs: in iTerm `recall open --tab` is native; Terminal.app has no tab API, so
+  recall emulates ⌘T via System Events — grant Terminal the Accessibility
+  permission (System Settings → Privacy & Security), or it falls back to a window.
 
 ## Acknowledgements
 

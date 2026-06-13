@@ -126,7 +126,7 @@ claude-recall/
 | `recall grep <запрос...>` | полнотекст по сырым транскриптам (fallback, когда индекс молчит) |
 | `recall show <id8>` | карточка сессии |
 | `recall cmd <id8>` | команда возобновления (handoff) |
-| `recall open <id8> [--fast]` | открыть сессию в новом окне терминала (spawn); если handoff-карточки нет — сначала сгенерит её (`--fast` — пропустить) |
+| `recall open <id8> [--fast] [--tab]` | открыть сессию в новом окне терминала (spawn); если handoff-карточки нет — сначала сгенерит её (`--fast` — пропустить); `--tab` — открыть табом |
 | `recall remove <id8>` | забыть сессию: карточка + строка индекса + tombstone |
 | `recall rename <id8> <имя...>` | задать имя сессии руками (автонейминг его больше не тронет) |
 | `recall handoff <file.jsonl>` | записать handoff-карточку (текущее состояние) сессии |
@@ -138,7 +138,8 @@ claude-recall/
 Env: `RECALL_DATA` (по умолчанию `~/.claude/session-recaps`), `RECALL_MODEL`
 (по умолчанию haiku), `RECALL_TERMINAL` (`Terminal`\|`iTerm`), `RECALL_MIN_EVENTS` (15),
 `RECALL_HANDOFF_DAYS` (30 — срок хранения handoff'ов),
-`RECALL_AUTONAME` (1 — автоимена сессий; `0` — выключить).
+`RECALL_AUTONAME` (1 — автоимена сессий; `0` — выключить),
+`RECALL_TAB` (`1` — `recall open` по умолчанию открывает табы; разово окном: `--window`).
 
 ## Требования и заметки
 
@@ -157,6 +158,10 @@ Env: `RECALL_DATA` (по умолчанию `~/.claude/session-recaps`), `RECALL
   `--fast` — пропустить), переобход всех недавних: `recall handoff --all --days 14`.
 - Если индекс молчит, `recall grep` ищет полнотекстом по сырым транскриптам
   в `~/.claude/projects/` — никаких дополнительных инструментов.
+- Табы: в iTerm `recall open --tab` работает нативно; у Terminal.app API табов
+  нет — recall эмулирует ⌘T через System Events, для этого выдай Terminal
+  разрешение Accessibility (Системные настройки → Конфиденциальность и
+  безопасность). Без разрешения откроется окно.
 
 ## Благодарности
 
