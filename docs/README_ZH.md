@@ -148,9 +148,10 @@ haiku）、`RECALL_TERMINAL`（`Terminal`\|`iTerm`）、`RECALL_MIN_EVENTS`（�
   `recall handoff --all --days 14`。
 - 如索引无结果，`recall grep` 会对 `~/.claude/projects/` 中的原始转录文件做全文
   检索——无需任何额外工具。
-- 标签页：iTerm 中 `recall open --tab` 原生支持；Terminal.app 无标签页 API，
-  recall 通过 System Events 模拟 ⌘T——需为 Terminal 授予辅助功能权限
-  （系统设置 → 隐私与安全性），否则回退为新窗口。
+- 标签页：iTerm 中 `recall open --tab` 原生且可靠。Terminal.app 无标签页 API，
+  recall 通过 System Events 模拟 ⌘T（尽力而为：需辅助功能权限，且即便有权限，
+  脚本化 ⌘T 仍可能因焦点丢失而失败）。recall 会校验标签页是否真的出现，否则
+  改开新窗口——绝不会把命令注入到忙碌的标签页。需要可靠标签页请用 iTerm。
 
 ## 致谢
 
