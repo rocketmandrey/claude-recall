@@ -23,7 +23,7 @@ import re
 import subprocess
 import sys
 
-VERSION = "0.5.3"
+VERSION = "0.5.4"
 DATA = os.environ.get("RECALL_DATA", os.path.expanduser("~/.claude/session-recaps"))
 MODEL = os.environ.get("RECALL_MODEL", "claude-haiku-4-5-20251001")
 MIN_EVENTS = int(os.environ.get("RECALL_MIN_EVENTS", "15"))
@@ -209,17 +209,27 @@ def autonamed_ids():
     return {l.strip()[:8] for l in open(AUTONAMED, encoding="utf-8") if l.strip()}
 
 
-def session_title(cwd, task):
-    loc, home = cwd or "?", os.path.expanduser("~")
-    if loc.startswith(home):
-        loc = loc[len(home):].lstrip("/") or "~"
-    parts = [p for p in loc.split("/") if p]
-    for k in (3, 2, 1):  # папка/проект/подпапка — as much as stays short
-        loc = "/".join(parts[-k:])
-        if len(loc) <= 34:
-            break
-    title = f"{loc} · {' '.join(task.split())}"
-    return title if len(title) <= 80 else title[:79].rsplit(" ", 1)[0] + "…"
+def project_prefix(cwd):
+    """Short project tag = the project's own folder name. Used for BOTH the title
+    prefix and the per-project tab colour, so naming and colour stay in sync."""
+    parts = [p for p in (cwd or "").split("/") if p]
+    return (parts[-1].strip() if parts else "") or "?"
+
+
+def session_title(cwd, task, limit=30):
+    # «<папка проекта> · <задача коротко>», hard-capped at `limit` chars so the
+    # iTerm tab bar stays readable — no more 80-char monsters
+    sep = " · "
+    prefix = project_prefix(cwd)
+    if len(prefix) > limit - 6 - len(sep):      # keep room for at least a task stub
+        prefix = prefix[:limit - 6 - len(sep)].rstrip()
+    task = " ".join((task or "").split())
+    if not task:
+        return prefix[:limit]
+    budget = limit - len(prefix) - len(sep)
+    if len(task) > budget:
+        task = (task[:budget - 1].rstrip() + "…") if budget > 1 else ""
+    return f"{prefix}{sep}{task}"[:limit]
 
 
 def registry_entries(session_id):
@@ -497,20 +507,21 @@ def cmd_open(id_prefix, fast=False, tab=False):
 # distinct, readable tab colors — same project always lands on the same one,
 # so iTerm's left tab bar shows a colored stripe per project (visual grouping)
 TAB_PALETTE = [
-    (224, 108, 94),   # coral
-    (224, 160, 76),   # amber
-    (207, 196, 74),   # gold
-    (111, 184, 85),   # green
-    (79, 179, 168),   # teal
-    (90, 143, 224),   # blue
-    (155, 111, 214),  # violet
-    (214, 111, 173),  # magenta
+    (228, 82, 82),    # red
+    (234, 142, 44),   # orange
+    (216, 198, 52),   # yellow
+    (92, 196, 92),    # green
+    (58, 190, 184),   # teal
+    (68, 138, 236),   # blue
+    (164, 102, 226),  # violet
+    (228, 96, 178),   # pink
 ]
 
 
 def tab_color(project):
     import zlib
-    return TAB_PALETTE[zlib.crc32((project or "").encode()) % len(TAB_PALETTE)]
+    key = project_prefix(project)  # colour by the project FOLDER name, not the full path
+    return TAB_PALETTE[zlib.crc32(key.encode()) % len(TAB_PALETTE)]  # → same folder = same stripe
 
 
 def iterm_color_prefix(project):
@@ -711,7 +722,7 @@ USAGE = """recall {VERSION} — session memory & orchestration for Claude Code
 
 env: RECALL_DATA, RECALL_MODEL, RECALL_TERMINAL (Terminal|iTerm), RECALL_MIN_EVENTS,
      RECALL_HANDOFF_DAYS (default 30 — handoff retention),
-     RECALL_AUTONAME (1 — auto-title sessions as папка/проект · задача; 0 to disable),
+     RECALL_AUTONAME (1 — auto-title sessions «<папка проекта> · <задача>», ≤30 chars; 0 off),
      RECALL_TAB (1 — recall open defaults to tabs; per-call override: --window)"""
 
 
