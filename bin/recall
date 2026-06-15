@@ -23,7 +23,7 @@ import re
 import subprocess
 import sys
 
-VERSION = "0.5.4"
+VERSION = "0.5.5"
 DATA = os.environ.get("RECALL_DATA", os.path.expanduser("~/.claude/session-recaps"))
 MODEL = os.environ.get("RECALL_MODEL", "claude-haiku-4-5-20251001")
 MIN_EVENTS = int(os.environ.get("RECALL_MIN_EVENTS", "15"))
@@ -507,14 +507,20 @@ def cmd_open(id_prefix, fast=False, tab=False):
 # distinct, readable tab colors — same project always lands on the same one,
 # so iTerm's left tab bar shows a colored stripe per project (visual grouping)
 TAB_PALETTE = [
-    (228, 82, 82),    # red
-    (234, 142, 44),   # orange
-    (216, 198, 52),   # yellow
-    (92, 196, 92),    # green
-    (58, 190, 184),   # teal
-    (68, 138, 236),   # blue
-    (164, 102, 226),  # violet
-    (228, 96, 178),   # pink
+    (230, 64, 64),    # red
+    (236, 128, 40),   # orange
+    (226, 168, 44),   # amber
+    (206, 196, 50),   # yellow
+    (150, 202, 58),   # lime
+    (74, 194, 90),    # green
+    (46, 192, 158),   # teal
+    (52, 186, 214),   # cyan
+    (60, 152, 238),   # sky
+    (78, 116, 240),   # blue
+    (122, 110, 236),  # indigo
+    (168, 96, 230),   # violet
+    (214, 84, 208),   # magenta
+    (234, 92, 156),   # pink
 ]
 
 
