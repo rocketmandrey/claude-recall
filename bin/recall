@@ -23,7 +23,7 @@ import re
 import subprocess
 import sys
 
-VERSION = "0.5.6"
+VERSION = "0.5.7"
 DATA = os.environ.get("RECALL_DATA", os.path.expanduser("~/.claude/session-recaps"))
 MODEL = os.environ.get("RECALL_MODEL", "claude-haiku-4-5-20251001")
 MIN_EVENTS = int(os.environ.get("RECALL_MIN_EVENTS", "15"))
@@ -229,23 +229,63 @@ def project_emoji(cwd):
     return EMOJI_PALETTE[zlib.crc32(("emoji:" + key).encode()) % len(EMOJI_PALETTE)]
 
 
+# leading action-verbs / question-words / connectors that waste the 1–2 word task slot —
+# drop them so the tab shows the meaningful noun («MCP-сервис»), not «создать…»/«почему…»
+TASK_STOPWORDS = {
+    # ru: leading verbs
+    "создать", "создай", "сделать", "сделай", "разработка", "разработать", "разработай",
+    "настроить", "настройка", "починить", "чинить", "добавить", "выбрать", "исследовать",
+    "изучить", "реализовать", "написать", "обновить", "проверить", "ковать", "куём", "куем",
+    # ru: question/fillers/connectors
+    "почему", "как", "что", "чтобы", "для", "на", "в", "с", "по", "при", "из", "о", "об",
+    "и", "а", "но", "же", "ли", "бы", "не", "это",
+    # en
+    "the", "a", "an", "to", "of", "for", "why", "how", "what", "fix", "build", "create",
+    "make", "add", "setup", "set", "update", "implement", "write", "debug", "investigate",
+}
+
+
+def short_task(task, n=2):
+    """1–2 content words from the task summary — drop a trailing process tag «(bun)»,
+    a leading filler/verb and any trailing connector: «почему сайт не открывается» → «сайт»,
+    «создать MCP-сервис …» → «MCP-сервис»."""
+    norm = lambda w: w.lower().strip("«».,!?\"'()[]")
+    task = re.sub(r"\s*\([^)]*\)\s*$", "", (task or "").strip())   # strip a trailing (bun)/(mcp) tag
+    words = [w for w in re.split(r"[\s—–:;,]+", task) if w]
+    while len(words) > n and norm(words[0]) in TASK_STOPWORDS:
+        words.pop(0)
+    out = words[:n]
+    while len(out) > 1 and norm(out[-1]) in TASK_STOPWORDS:
+        out.pop()
+    return " ".join(out)
+
+
+def short_folder(name, max_len):
+    """Keep the folder short too: whole if it fits, else its first word, else truncated."""
+    name = name.strip()
+    if len(name) <= max_len:
+        return name
+    first = name.split()[0] if name.split() else name
+    if len(first) <= max_len:
+        return first
+    return first[:max(1, max_len - 1)].rstrip() + "…"
+
+
 def session_title(cwd, task, limit=30):
-    # «<эмодзи> <папка проекта> · <задача коротко>» — emoji is a stable per-project
-    # anchor; hard-capped so the iTerm tab bar stays readable (no 80-char monsters).
+    # «<эмодзи> <папка> · <задача 1–2 словами>» — emoji + colour stable per project;
+    # BOTH parts kept short so the iTerm tab bar stays readable and the task survives.
     sep = " · "
     icon = project_emoji(cwd)
     head = f"{icon} " if icon else ""
     body_limit = limit - 3            # emoji renders ~2 cols + 1 space — reserve for it
-    prefix = project_prefix(cwd)
-    if len(prefix) > body_limit - 6 - len(sep):      # keep room for at least a task stub
-        prefix = prefix[:max(0, body_limit - 6 - len(sep))].rstrip()
-    task = " ".join((task or "").split())
+    folder = short_folder(project_prefix(cwd), body_limit - len(sep) - 11)  # leave ≥11 for task
+    task = short_task(task)
     if not task:
-        return head + prefix[:body_limit]
-    budget = body_limit - len(prefix) - len(sep)
+        return head + folder[:body_limit]
+    budget = body_limit - len(folder) - len(sep)
     if len(task) > budget:
         task = (task[:budget - 1].rstrip() + "…") if budget > 1 else ""
-    body = f"{prefix}{sep}{task}" if task else prefix
+    body = f"{folder}{sep}{task}" if task else folder
     return head + body[:body_limit]
 
 
