@@ -23,7 +23,7 @@ import re
 import subprocess
 import sys
 
-VERSION = "0.5.7"
+VERSION = "0.5.8"
 DATA = os.environ.get("RECALL_DATA", os.path.expanduser("~/.claude/session-recaps"))
 MODEL = os.environ.get("RECALL_MODEL", "claude-haiku-4-5-20251001")
 MIN_EVENTS = int(os.environ.get("RECALL_MIN_EVENTS", "15"))
@@ -557,8 +557,10 @@ def cmd_open(id_prefix, fast=False, tab=False):
                 cmd_handoff(tr[0])
             except Exception as e:
                 print(f"  handoff failed ({e}) — opening anyway")
+    tm = re.search(r"^task:\s*(.+)$", m.get("text", ""), re.M)
+    title = session_title(m["project"], tm.group(1) if tm else "")
     shell_cmd = f'cd "{m["project"]}" && claude --resume {m["id"]}'
-    open_in_terminal(shell_cmd, tab=tab, project=m["project"])
+    open_in_terminal(shell_cmd, tab=tab, project=m["project"], title=title)
 
 
 # distinct, readable tab colors — same project always lands on the same one,
@@ -595,6 +597,15 @@ def iterm_color_prefix(project):
     return (f"printf '\\033]6;1;bg;red;brightness;{r}\\a"
             f"\\033]6;1;bg;green;brightness;{g}\\a"
             f"\\033]6;1;bg;blue;brightness;{b}\\a'; ")
+
+
+def iterm_title_prefix(title):
+    """OSC 0 so the tab shows recall's short «<emoji> <folder> · <task>» name. Only sticks
+    when Claude Code's own title updates are off (CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1)."""
+    if not title:
+        return ""
+    t = title.replace("\\", "").replace("'", "")
+    return f"printf '\\033]0;{t}\\a'; "
 
 
 def _iterm_ttys():
@@ -697,7 +708,9 @@ def cmd_regroup(quiet=False):
     return cmap
 
 
-def open_in_terminal(shell_cmd, tab=False, project=None):
+def open_in_terminal(shell_cmd, tab=False, project=None, title=None):
+    if title:                       # OSC-0 title so the tab shows recall's short name
+        shell_cmd = iterm_title_prefix(title) + shell_cmd
     term = os.environ.get("RECALL_TERMINAL", "Terminal")
     if term.lower() == "iterm":
         # iTerm tabs are first-class AppleScript citizens; fall back to a
