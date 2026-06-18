@@ -23,7 +23,7 @@ import re
 import subprocess
 import sys
 
-VERSION = "0.5.8"
+VERSION = "0.5.13"
 DATA = os.environ.get("RECALL_DATA", os.path.expanduser("~/.claude/session-recaps"))
 MODEL = os.environ.get("RECALL_MODEL", "claude-haiku-4-5-20251001")
 MIN_EVENTS = int(os.environ.get("RECALL_MIN_EVENTS", "15"))
@@ -236,6 +236,7 @@ TASK_STOPWORDS = {
     "создать", "создай", "сделать", "сделай", "разработка", "разработать", "разработай",
     "настроить", "настройка", "починить", "чинить", "добавить", "выбрать", "исследовать",
     "изучить", "реализовать", "написать", "обновить", "проверить", "ковать", "куём", "куем",
+    "исправить", "исправление", "исправь", "доработать", "доработка", "доработай",
     # ru: question/fillers/connectors
     "почему", "как", "что", "чтобы", "для", "на", "в", "с", "по", "при", "из", "о", "об",
     "и", "а", "но", "же", "ли", "бы", "не", "это",
@@ -246,23 +247,48 @@ TASK_STOPWORDS = {
 
 
 def short_task(task, n=2):
-    """1–2 content words from the task summary — drop a trailing process tag «(bun)»,
-    a leading filler/verb and any trailing connector: «почему сайт не открывается» → «сайт»,
-    «создать MCP-сервис …» → «MCP-сервис»."""
+    """Up to n *content* words from the task summary — drop a trailing process tag «(bun)»,
+    then skip filler verbs / question-words / connectors ANYWHERE so the slot holds real nouns:
+    «разработка pipeline проверок» → «pipeline проверок», «Диагностика и исправление выгрузки»
+    → «Диагностика выгрузки», «Интеграция с Tochka API» → «Интеграция Tochka». Negations are
+    never dropped so «сайт не открывается» keeps its meaning."""
     norm = lambda w: w.lower().strip("«».,!?\"'()[]")
+    keep_always = {"не", "нет", "ни", "not", "no"}                 # never swallow a negation
     task = re.sub(r"\s*\([^)]*\)\s*$", "", (task or "").strip())   # strip a trailing (bun)/(mcp) tag
-    words = [w for w in re.split(r"[\s—–:;,]+", task) if w]
-    while len(words) > n and norm(words[0]) in TASK_STOPWORDS:
-        words.pop(0)
-    out = words[:n]
-    while len(out) > 1 and norm(out[-1]) in TASK_STOPWORDS:
-        out.pop()
-    return " ".join(out)
+    words = [w for w in re.split(r"[\s—–:;,/]+", task) if w]
+    content = [w for w in words if norm(w) in keep_always or norm(w) not in TASK_STOPWORDS]
+    picked = [w.strip("«».,!?\"'`()[]") for w in (content or words)[:n]]   # no leaked «"» edges
+    return " ".join(w for w in picked if w)
+
+
+# tiny fixed codes for the projects juggled daily — the folder name is the column
+# hog (e.g. «Rosperevozki_сделки» = 19 cols), so collapse it to 2–3 cols and hand the
+# rest to the task. Matched as a case-insensitive keyword anywhere in the folder name;
+# more specific keys first so a sub-folder wins over its parent project.
+FOLDER_ALIASES = [
+    ("коллцентр", "КЦ"), ("колцентр", "КЦ"), ("callcenter", "КЦ"), ("call-center", "КЦ"),
+    ("rosperevozki", "RP"), ("росперевозки", "RP"),
+    ("welly", "WL"), ("велли", "WL"),
+    ("n8n", "N8N"),
+]
+
+
+def folder_alias(name):
+    """Collapse a known project folder to its tiny code (Rosperevozki_сделки → RP,
+    «Колл Центр » → КЦ). Separators are ignored on both sides so spacing/case never
+    breaks the match. Unknown folders pass through for short_folder() to size down."""
+    squash = lambda s: re.sub(r"[\s_\-]+", "", (s or "").lower())
+    low = squash(name)
+    for key, code in FOLDER_ALIASES:
+        if squash(key) in low:
+            return code
+    return (name or "").strip()
 
 
 def short_folder(name, max_len):
-    """Keep the folder short too: whole if it fits, else its first word, else truncated."""
-    name = name.strip()
+    """Map known projects to a tiny code (Rosperevozki→RP, коллцентр→КЦ, welly→WL) so the
+    task gets the columns; unknown folders fall back to whole/first-word/truncated."""
+    name = folder_alias(name)
     if len(name) <= max_len:
         return name
     first = name.split()[0] if name.split() else name
@@ -546,21 +572,119 @@ def cmd_grep(terms):
         print(f"(+{len(files) - 15} more sessions matched)")
 
 
+def _session_cwd(jsonl_path):
+    """The exact cwd claude recorded for a session — authoritative for `--resume`.
+    The YAML card strips trailing spaces from `project:`, which silently breaks `cd`
+    into folders like «Колл Центр » (trailing space) and resumes the wrong sibling."""
+    try:
+        with open(jsonl_path, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                mm = re.search(r'"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"', line)
+                if mm:
+                    return json.loads('"' + mm.group(1) + '"')
+    except Exception:
+        return None
+    return None
+
+
 def cmd_open(id_prefix, fast=False, tab=False):
-    m = card_meta(resolve_card(id_prefix))
-    if not fast and not os.path.exists(os.path.join(HANDOFFS, f"{m['id']}.md")):
-        tr = glob.glob(os.path.join(PROJECTS_DIR, "*", f"{m['id']}.jsonl"))
-        if tr:
-            print("no handoff card — writing one so the session wakes up informed "
-                  "(~30s, one haiku call; skip with --fast)")
-            try:
-                cmd_handoff(tr[0])
-            except Exception as e:
-                print(f"  handoff failed ({e}) — opening anyway")
-    tm = re.search(r"^task:\s*(.+)$", m.get("text", ""), re.M)
-    title = session_title(m["project"], tm.group(1) if tm else "")
-    shell_cmd = f'cd "{m["project"]}" && claude --resume {m["id"]}'
-    open_in_terminal(shell_cmd, tab=tab, project=m["project"], title=title)
+    # resolve via recall card when one exists; otherwise fall back to a cardless
+    # resume by raw jsonl id (forks and freshly-spawned sessions have no card yet).
+    try:
+        m = card_meta(resolve_card(id_prefix))
+        sid = m["id"]
+    except Exception:
+        m, sid = None, None
+    if m is None:
+        g = glob.glob(os.path.join(PROJECTS_DIR, "*", f"{id_prefix}*.jsonl"))
+        if not g or not os.path.exists(g[0]):
+            print(f"open: no card and no session jsonl for '{id_prefix}'"); return
+        sid = os.path.basename(g[0])[:-len(".jsonl")]
+        tr = [g[0]]
+        project = _session_cwd(g[0]) or ""
+        if not project:
+            print(f"open: cannot determine cwd for '{sid[:8]}'"); return
+        title = session_title(project, "сессия")
+    else:
+        tr = glob.glob(os.path.join(PROJECTS_DIR, "*", f"{sid}.jsonl"))
+        if not fast and not os.path.exists(os.path.join(HANDOFFS, f"{sid}.md")):
+            if tr:
+                print("no handoff card — writing one so the session wakes up informed "
+                      "(~30s, one haiku call; skip with --fast)")
+                try:
+                    cmd_handoff(tr[0])
+                except Exception as e:
+                    print(f"  handoff failed ({e}) — opening anyway")
+        # prefer the jsonl's exact cwd (preserves trailing spaces) over the YAML-stripped card
+        project = (_session_cwd(tr[0]) if tr else None) or m["project"]
+        tm = re.search(r"^task:\s*(.+)$", m.get("text", ""), re.M)
+        title = session_title(project, tm.group(1) if tm else "")
+    shell_cmd = f'cd "{project}" && claude --resume {sid}'
+    # RECALL_CLAUDE_FLAGS: extra flags appended to `claude` (before any seed prompt),
+    # e.g. "--dangerously-skip-permissions". Flags precede the positional prompt arg.
+    flags = os.environ.get("RECALL_CLAUDE_FLAGS")
+    if flags:
+        shell_cmd += f" {flags}"
+    # optional seed prompt: RECALL_SEED_FILE points at a text file whose contents are
+    # passed as claude's initial prompt, so the resumed session wakes up already knowing
+    # the new task. cat runs in the spawned shell, so the prompt body never touches the
+    # AppleScript layer (no escaping headaches); only the simple "$(cat '...')" wrapper does.
+    seed = os.environ.get("RECALL_SEED_FILE")
+    if seed and os.path.exists(seed):
+        shell_cmd += f" \"$(cat '{seed}')\""
+    open_in_terminal(shell_cmd, tab=tab, project=project, title=title)
+
+
+def cmd_fork(id_prefix, at_line=None, anchor=None, tab=False, task="форк"):
+    """Branch a NEW session from an existing one at a chosen transcript line.
+    Copies the prefix (lines 1..cut) into a fresh session UUID, rewriting the
+    sessionId so `claude --resume` treats it as its own branch; the original is
+    untouched. Use it to peel a still-relevant thread off a conversation that
+    later drifted elsewhere. The session UUID appears only as `sessionId` (message
+    uuids differ), so a plain string-swap rewrites exactly the right field.
+    RECALL_SEED_FILE still works → the fork wakes with an initial prompt."""
+    import uuid as _uuid
+    g = glob.glob(os.path.join(PROJECTS_DIR, "*", f"{id_prefix}*.jsonl"))
+    if not g:
+        try:
+            m = card_meta(resolve_card(id_prefix))
+            g = glob.glob(os.path.join(PROJECTS_DIR, "*", f"{m['id']}.jsonl"))
+        except Exception:
+            g = []
+    if not g or not os.path.exists(g[0]):
+        print(f"fork: session jsonl for '{id_prefix}' not found"); return None
+    src = g[0]
+    old_id = os.path.basename(src)[:-len(".jsonl")]
+    cut = at_line
+    if cut is None and anchor:
+        with open(src, encoding="utf-8", errors="ignore") as f:
+            for i, line in enumerate(f, 1):
+                if anchor in line:
+                    cut = i  # last line containing the anchor
+    if not cut:
+        print("fork: need --at-line N (or --anchor TEXT)"); return None
+    new_id = str(_uuid.uuid4())
+    dst = os.path.join(os.path.dirname(src), new_id + ".jsonl")
+    n = 0
+    with open(src, encoding="utf-8", errors="ignore") as f, \
+         open(dst, "w", encoding="utf-8") as o:
+        for i, line in enumerate(f, 1):
+            if i > cut:
+                break
+            o.write(line.replace(old_id, new_id))
+            n += 1
+    project = _session_cwd(dst) or _session_cwd(src) or ""
+    title = session_title(project, task) if project else None
+    print(f"forked {old_id[:8]} → {new_id[:8]}  ({n} lines, cut @ {cut})  {project}")
+    shell_cmd = f'cd "{project}" && claude --resume {new_id}'
+    flags = os.environ.get("RECALL_CLAUDE_FLAGS")
+    if flags:
+        shell_cmd += f" {flags}"
+    seed = os.environ.get("RECALL_SEED_FILE")
+    if seed and os.path.exists(seed):
+        shell_cmd += f" \"$(cat '{seed}')\""
+    open_in_terminal(shell_cmd, tab=tab, project=project, title=title)
+    return new_id
 
 
 # distinct, readable tab colors — same project always lands on the same one,
@@ -890,6 +1014,9 @@ USAGE = """recall {VERSION} — session memory & orchestration for Claude Code
                     [--tab]     session's missing handoff card first unless --fast;
                                 --tab opens a tab instead (Terminal.app needs the
                                 Accessibility permission; falls back to a window)
+  recall fork <id8> --at-line N branch a NEW session from line N of <id8>'s
+                  [--anchor T]  transcript (or last line containing T); opens it
+                  [--window]    (RECALL_SEED_FILE seeds an initial prompt)
   recall remove <id8>           forget a session: card + index line + tombstone
   recall rename <id8> <title>   set a session's display name by hand (auto-naming then leaves it alone)
   recall recap <file.jsonl>     recap one transcript [--force] (--force also un-removes)
@@ -929,6 +1056,11 @@ def main():
     elif args[0] == "open" and len(args) > 1:
         tab = "--tab" in args or (os.environ.get("RECALL_TAB") == "1" and "--window" not in args)
         cmd_open(args[1], fast="--fast" in args, tab=tab)
+    elif args[0] == "fork" and len(args) > 1:
+        flagv = lambda n: (args[args.index(n) + 1] if n in args and args.index(n) + 1 < len(args) else None)
+        at = flagv("--at-line")
+        tab = "--tab" in args or (os.environ.get("RECALL_TAB") == "1" and "--window" not in args)
+        cmd_fork(args[1], at_line=int(at) if at else None, anchor=flagv("--anchor"), tab=tab)
     elif args[0] in ("remove", "rm", "forget") and len(args) > 1:
         cmd_remove(args[1])
     elif args[0] == "rename" and len(args) > 2:

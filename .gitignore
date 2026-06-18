@@ -9,3 +9,6 @@ node_modules/
 .idea/
 *.log
 token.txt
+
+# local work/scratch context docs (may contain private chat ids, deal numbers)
+/context-*.md
