@@ -53,6 +53,28 @@ next: null
 选择器不再是一片 "no name"。标题随任务演进自动刷新。手动设置的名称绝不会被覆盖；
 显式命名：`recall rename <id8> <标题>`；关闭：`RECALL_AUTONAME=0`。
 
+## 状态栏：每个标签页都有地址
+
+安装器还会装上一个为驾驭*会话舰队*而设计的 Claude Code 状态栏。每个状态栏长这样：
+
+```
+• claude-recall [s034] | 5h:63% 2h0m 7d:18% 2d7h | ctx:45% | e:xh | opus4.8 1M
+```
+
+- **`[s034]`** —— 杀手级特性：标签页的**地址**。它是该会话的 iTerm tty。你说"去
+  s034"，编排器就把上下文直接注入到那个标签页（`osascript … write text`）——无需
+  翻找正确的窗口。tty 的获取方式：从脚本自身**向上**遍历进程树（状态栏跑在没有自己
+  tty 的管道上）直到拥有真实终端的 `claude` 进程；若什么都没找到，则回退到
+  session_id 的前 8 个字符。
+- **`5h:63% 2h0m` / `7d:18% 2d7h`** —— 你的 Pro/Max 速率限制，以**剩余百分比**加上
+  距重置的时间显示，按绿 / 黄 / 红配色（需要 Claude Code ≥ 2.1.80）。
+- **`ctx:45%`** —— 上下文窗口占用。**`e:xh`** —— 来自 `settings.json` `.effortLevel`
+  的 effort 级别（`xh`/`hi`/`md`/`lo`）。**`opus4.8 1M`** —— 模型名，紧凑显示，1M
+  上下文变体带 `1M` 后缀。
+
+于是一队标签页变得可逐一寻址：扫一眼状态栏，按 `[s0NN]` 挑出标签页，编排器便能直接
+驱动那个会话。
+
 ## 安装
 
 在 Claude Code 中粘贴：
@@ -69,9 +91,11 @@ git clone https://github.com/rocketmandrey/claude-recall.git && cd claude-recall
 recall backfill           # 可选：索引历史会话
 ```
 
-`install.sh` 合并写入 `~/.claude/settings.json`（绝不覆盖）：SessionEnd 钩子和
-`Bash(recall *)` 权限——智能体在任何新会话中调用 recall 都无需弹窗确认。此后每个
-结束的会话（≥15 个事件）都会自动索引。
+`install.sh` 合并写入 `~/.claude/settings.json`（绝不覆盖）：SessionEnd 钩子、
+`Bash(recall *)` 权限以及 `statusLine` 命令——智能体在任何新会话中调用 recall 都
+无需弹窗确认。此后每个结束的会话（≥15 个事件）都会自动索引。状态栏的合并是幂等的，
+且**绝不覆盖外来的那个**：如果你已把 `statusLine` 指向别的命令，安装器会保留你的，
+只打印如何切换。
 
 **handoff 持续性循环是可选的（opt-in）**——安装器会提议，但绝不强制：每次上下文
 压缩前，小模型写入一张状态卡片，压缩/恢复后重新注入——会话醒来时清楚知道刚才做到
@@ -103,10 +127,11 @@ recall backfill           # 可选：索引历史会话
 
 ```
 claude-recall/
-├── bin/recall              ← 整个产品：单个 Python 文件，零依赖
-├── skill/SKILL.md          ← Claude Code 的 session-orchestrator skill
-├── install.sh              ← 安装器：CLI + skill + 钩子 + 权限
-└── docs/                   ← README 翻译（RU、ZH）
+├── bin/recall                  ← 整个产品：单个 Python 文件，零依赖
+├── bin/statusline-command.sh   ← 舰队状态栏：项目 [s0NN] | 限额 | ctx | 模型
+├── skill/SKILL.md              ← Claude Code 的 session-orchestrator skill
+├── install.sh                  ← 安装器：CLI + skill + 状态栏 + 钩子 + 权限
+└── docs/                       ← README 翻译（RU、ZH）
 ```
 
 ## CLI

@@ -21,6 +21,7 @@ RECALL_HOME="$HOME/.claude/recall"
 SKILL_DIR="$HOME/.claude/skills/session-orchestrator"
 SETTINGS="$HOME/.claude/settings.json"
 BIN_LINK="$HOME/.local/bin/recall"
+STATUSLINE="$HOME/.claude/statusline-command.sh"
 
 echo "claude-recall installer"
 
@@ -42,6 +43,12 @@ echo "  ✓ CLI -> $BIN_LINK"
 mkdir -p "$SKILL_DIR"
 cp "$REPO_DIR/skill/SKILL.md" "$SKILL_DIR/SKILL.md"
 echo "  ✓ skill -> $SKILL_DIR"
+
+# 2b. Status line — shows each tab's address [s0NN] (its iTerm tty) so the
+# orchestrator can inject context straight into a named tab ("go to s053").
+cp "$REPO_DIR/bin/statusline-command.sh" "$STATUSLINE"
+chmod +x "$STATUSLINE"
+echo "  ✓ status line -> $STATUSLINE"
 
 # 3. Handoff loop is opt-in: offer it, don't force it
 if [[ -z "$HANDOFF" ]]; then
@@ -103,6 +110,31 @@ json.dump(settings, open(settings_path, "w"), indent=2, ensure_ascii=False)
 state = "ON" if handoff else "off (optional; ./install.sh --with-handoff)"
 print("  ✓ SessionEnd hook + permissions -> " + settings_path)
 print("  ✓ handoff loop: " + state)
+PY
+
+# 4b. Status line in settings.json — idempotent, never clobbers a foreign one.
+python3 - "$SETTINGS" <<'PY'
+import json, os, sys, time
+settings_path = sys.argv[1]
+ours = "bash ~/.claude/statusline-command.sh"
+settings = {}
+if os.path.exists(settings_path):
+    settings = json.load(open(settings_path))
+sl = settings.get("statusLine")
+cur = sl.get("command", "") if isinstance(sl, dict) else ""
+if isinstance(sl, dict) and cur and "statusline-command.sh" not in cur:
+    # A different status line is already configured — keep it, just note it.
+    print("  • status line: kept your existing one (" + cur + ")")
+    print("    to switch: set statusLine.command to \"" + ours + "\" in " + settings_path)
+else:
+    if isinstance(sl, dict) and cur and cur != ours:
+        # Ours but stale path/wording — back up the old value before rewriting.
+        bak = settings_path + ".statusline.bak." + time.strftime("%Y%m%d%H%M%S")
+        json.dump(sl, open(bak, "w"), indent=2, ensure_ascii=False)
+        print("  • status line: backed up previous -> " + bak)
+    settings["statusLine"] = {"type": "command", "command": ours}
+    json.dump(settings, open(settings_path, "w"), indent=2, ensure_ascii=False)
+    print("  ✓ status line -> " + settings_path)
 PY
 
 # 5. Verify

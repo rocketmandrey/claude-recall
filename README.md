@@ -62,6 +62,30 @@ Every recap (and every handoff, if the loop is on) also titles the session
 the task evolves. Names you set by hand are never overwritten; set one explicitly
 with `recall rename <id8> <title>`; disable with `RECALL_AUTONAME=0`.
 
+## Status line: every tab gets an address
+
+The installer also drops in a Claude Code status line built for running a *fleet* of
+sessions. Each bar looks like this:
+
+```
+• claude-recall [s034] | 5h:63% 2h0m 7d:18% 2d7h | ctx:45% | e:xh | opus4.8 1M
+```
+
+- **`[s034]`** — the killer feature: the tab's **address**. It's the iTerm tty of that
+  session. Say *"go to s034"* and the orchestrator injects context straight into that
+  exact tab (`osascript … write text`) — no hunting for the right window. The script
+  finds the tty by walking **up** the process tree from itself (the status line runs on
+  a pipe with no tty of its own) to the `claude` process that owns the real terminal;
+  if nothing is found it falls back to the first 8 chars of the session id.
+- **`5h:63% 2h0m` / `7d:18% 2d7h`** — your Pro/Max rate limits as **percent remaining**
+  plus time until reset, color-coded green / yellow / red (needs Claude Code ≥ 2.1.80).
+- **`ctx:45%`** — context-window usage. **`e:xh`** — effort level from
+  `settings.json` `.effortLevel` (`xh`/`hi`/`md`/`lo`). **`opus4.8 1M`** — the model,
+  compact, with a `1M` suffix for the 1M-context variant.
+
+So a fleet of tabs becomes individually addressable: glance at the bars, pick the tab
+by its `[s0NN]`, and the orchestrator drives that session directly.
+
 ## Installation
 
 Paste this into Claude Code:
@@ -79,9 +103,11 @@ recall backfill           # optional: index your past sessions
 ```
 
 `install.sh` merges into `~/.claude/settings.json` (never overwrites): the SessionEnd
-hook and `Bash(recall *)` permissions, so agents can call recall in any new session
-without prompts. From then on every finished session (≥15 events) is indexed
-automatically.
+hook, `Bash(recall *)` permissions, and the `statusLine` command, so agents can call
+recall in any new session without prompts. From then on every finished session
+(≥15 events) is indexed automatically. The status line merge is idempotent and
+**never clobbers a foreign one** — if you already point `statusLine` at a different
+command, the installer keeps yours and just prints how to switch.
 
 The **handoff continuity loop is opt-in** — the installer offers it (and never
 forces it): before every context compaction a small LLM writes a state card,
@@ -127,10 +153,11 @@ Just say in Claude Code:
 
 ```
 claude-recall/
-├── bin/recall              ← the whole product: one Python file, zero deps
-├── skill/SKILL.md          ← session-orchestrator skill for Claude Code
-├── install.sh              ← installer: CLI + skill + hook + permissions
-└── docs/                   ← README translations (RU, ZH)
+├── bin/recall                  ← the whole product: one Python file, zero deps
+├── bin/statusline-command.sh   ← fleet status line: project [s0NN] | limits | ctx | model
+├── skill/SKILL.md              ← session-orchestrator skill for Claude Code
+├── install.sh                  ← installer: CLI + skill + status line + hook + permissions
+└── docs/                       ← README translations (RU, ZH)
 ```
 
 ## CLI
