@@ -23,7 +23,7 @@ import re
 import subprocess
 import sys
 
-VERSION = "0.5.13"
+VERSION = "0.5.16"
 DATA = os.environ.get("RECALL_DATA", os.path.expanduser("~/.claude/session-recaps"))
 MODEL = os.environ.get("RECALL_MODEL", "claude-haiku-4-5-20251001")
 MIN_EVENTS = int(os.environ.get("RECALL_MIN_EVENTS", "15"))
@@ -36,6 +36,7 @@ HANDOFF_DAYS = int(os.environ.get("RECALL_HANDOFF_DAYS", "30"))
 AUTONAMED = os.path.join(DATA, ".autonamed")  # id8 per line; titles we set (manual ones are sacred)
 AUTONAME = os.environ.get("RECALL_AUTONAME", "1") != "0"
 SESSIONS_DIR = os.path.expanduser("~/.claude/sessions")
+ARCHIVE = os.path.expanduser(os.environ.get("RECALL_ARCHIVE", "~/backups/claude-transcripts"))  # durable, append-only transcript backup OUT of the prune zone
 
 # fallback dirs only — appended, so the user's PATH order always wins
 for d in ("~/.npm-global/bin", "/opt/homebrew/bin", "/usr/local/bin", "~/.local/bin"):
@@ -472,6 +473,7 @@ def cmd_handoff_hook():
         return
     if not os.path.isfile(transcript):
         return
+    archive_one(transcript)  # back up immediately (SessionEnd/PreCompact), before any cleanup can delete it
     with open(transcript, errors="replace") as f:
         if sum(1 for _ in f) < MIN_EVENTS:
             return
@@ -572,6 +574,21 @@ def cmd_grep(terms):
         print(f"(+{len(files) - 15} more sessions matched)")
 
 
+def _migrate_to_dev(cwd):
+    """Folders moved out of ~/Documents (macOS TCC blocks reading them) into ~/dev.
+    Remap a recorded cwd to its ~/dev twin IF that twin actually exists, so resuming an
+    old session opens in the new, accessible spot. Mirrors the path, dropping a legacy
+    'Cursor/' level if present. Non-moved folders keep their original path untouched.
+    Add a new mapping = just move the folder to the mirrored ~/dev path; this auto-picks it up."""
+    if not cwd or "/Documents/" not in cwd:
+        return cwd
+    for cand in (cwd.replace("/Documents/Cursor/", "/dev/", 1),
+                 cwd.replace("/Documents/", "/dev/", 1)):
+        if cand != cwd and os.path.isdir(cand):
+            return cand
+    return cwd
+
+
 def _session_cwd(jsonl_path):
     """The exact cwd claude recorded for a session — authoritative for `--resume`.
     The YAML card strips trailing spaces from `project:`, which silently breaks `cd`
@@ -581,7 +598,7 @@ def _session_cwd(jsonl_path):
             for line in f:
                 mm = re.search(r'"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"', line)
                 if mm:
-                    return json.loads('"' + mm.group(1) + '"')
+                    return _migrate_to_dev(json.loads('"' + mm.group(1) + '"'))
     except Exception:
         return None
     return None
@@ -593,12 +610,18 @@ def cmd_open(id_prefix, fast=False, tab=False):
     try:
         m = card_meta(resolve_card(id_prefix))
         sid = m["id"]
-    except Exception:
+    except (Exception, SystemExit):  # resolve_card sys.exit()s when cardless — fall through to raw-jsonl/orphan path
         m, sid = None, None
     if m is None:
         g = glob.glob(os.path.join(PROJECTS_DIR, "*", f"{id_prefix}*.jsonl"))
         if not g or not os.path.exists(g[0]):
-            print(f"open: no card and no session jsonl for '{id_prefix}'"); return
+            print(f"open: no live transcript for '{id_prefix}'.")
+            rep = orphan_artifacts(id_prefix)
+            if rep:
+                print("the .jsonl is gone — reconstruct from what survived, don't expect a resume:\n" + rep)
+            else:
+                print("nothing found under ~/.claude/projects for that id.")
+            return
         sid = os.path.basename(g[0])[:-len(".jsonl")]
         tr = [g[0]]
         project = _session_cwd(g[0]) or ""
@@ -607,6 +630,13 @@ def cmd_open(id_prefix, fast=False, tab=False):
         title = session_title(project, "сессия")
     else:
         tr = glob.glob(os.path.join(PROJECTS_DIR, "*", f"{sid}.jsonl"))
+        if not tr:
+            print(f"⚠ recall: card exists for {sid[:8]} but its transcript .jsonl is DELETED "
+                  "— a resume would open a BLANK session. Not opening.")
+            rep = orphan_artifacts(sid)
+            if rep:
+                print("surviving artifacts (reconstruct context from these):\n" + rep)
+            return
         if not fast and not os.path.exists(os.path.join(HANDOFFS, f"{sid}.md")):
             if tr:
                 print("no handoff card — writing one so the session wakes up informed "
@@ -936,6 +966,7 @@ def cmd_hook():
         return
     if not os.path.isfile(transcript):
         return
+    archive_one(transcript)  # back up immediately (SessionEnd/PreCompact), before any cleanup can delete it
     with open(transcript, errors="replace") as f:
         if sum(1 for _ in f) < MIN_EVENTS:
             return
@@ -1029,14 +1060,97 @@ USAGE = """recall {VERSION} — session memory & orchestration for Claude Code
   recall restore-hook           SessionStart hook entrypoint (stdin JSON; prints handoff)
   recall index                  index stats
   recall doctor                 check installation
+  recall archive [dest]         durable append-only backup of every transcript jsonl OUT
+                  [--quiet]      of the prune zone (default ~/backups/claude-transcripts);
+                                 deleted originals stay recoverable here
   recall regroup                iTerm: recolour every open tab so each project folder
                                 gets a DISTINCT colour (set-aware; no hash collisions)
 
-env: RECALL_DATA, RECALL_MODEL, RECALL_TERMINAL (Terminal|iTerm), RECALL_MIN_EVENTS,
+env: RECALL_DATA, RECALL_MODEL, RECALL_ARCHIVE (~/backups/claude-transcripts — durable transcript backup dir),
+     RECALL_TERMINAL (Terminal|iTerm), RECALL_MIN_EVENTS,
      RECALL_HANDOFF_DAYS (default 30 — handoff retention),
      RECALL_AUTONAME (1 — auto-title «<эмодзи> <папка> · <задача>», ≤30 chars; 0 off),
      RECALL_REGROUP (1 — after `recall open`, recolour all iTerm tabs distinctly; 0 off),
      RECALL_TAB (1 — recall open defaults to tabs; per-call override: --window)"""
+
+
+def archive_one(path):
+    """Copy ONE transcript into ARCHIVE immediately (called on SessionEnd) so it survives
+    even if something deletes the original before the periodic `recall archive` sweep runs."""
+    import shutil
+    try:
+        d_dir = os.path.join(ARCHIVE, os.path.basename(os.path.dirname(path)))
+        os.makedirs(d_dir, exist_ok=True)
+        shutil.copy2(path, os.path.join(d_dir, os.path.basename(path)))
+    except OSError:
+        pass
+
+
+def archive_hit(sid):
+    """Return a backed-up copy of a deleted transcript from ARCHIVE, if one exists."""
+    g = glob.glob(os.path.join(ARCHIVE, "*", f"{sid}*.jsonl"))
+    return g[0] if g else None
+
+
+def orphan_artifacts(sid):
+    """Transcript .jsonl is gone — report what survived so context can be reconstructed:
+    the session's subagents/tool-results folder, the project's memory dir, and any
+    archived copy of the transcript itself."""
+    out = []
+    for f in glob.glob(os.path.join(PROJECTS_DIR, "*", f"{sid}*")):
+        if not os.path.isdir(f):
+            continue
+        proj = os.path.basename(os.path.dirname(f))
+        subs = glob.glob(os.path.join(f, "subagents", "*.meta.json"))
+        trez = glob.glob(os.path.join(f, "tool-results", "*"))
+        out.append(f"  artifacts: {f}")
+        if subs:
+            out.append(f"    {len(subs)} subagent metas (work descriptions survive)")
+        if trez:
+            out.append(f"    {len(trez)} tool-results")
+        mem = os.path.join(PROJECTS_DIR, proj, "memory")
+        if os.path.isdir(mem):
+            out.append(f"    project memory: {mem}")
+    arch = archive_hit(sid)
+    if arch:
+        out.append(f"  ✅ ARCHIVED COPY EXISTS: {arch}")
+        out.append(f"     restore: cp '{arch}' '{os.path.join(PROJECTS_DIR, '<projecthash>')}/'")
+    return "\n".join(out)
+
+
+def cmd_archive(dest=None, quiet=False):
+    """Durable, append-only backup of every transcript jsonl, OUT of the prune zone.
+    recall is an INDEX over live ~/.claude/projects jsonl; Claude Code (or manual
+    cleanup) deletes them, so we copy each <projecthash>/<id>.jsonl into ARCHIVE and
+    NEVER delete from there — a deleted original stays recoverable. Incremental:
+    copies only new/changed files (size or newer mtime)."""
+    import shutil
+    dest = os.path.expanduser(dest or ARCHIVE)
+    os.makedirs(dest, exist_ok=True)
+    new = upd = same = 0
+    for s in glob.glob(os.path.join(PROJECTS_DIR, "*", "*.jsonl")):
+        proj = os.path.basename(os.path.dirname(s))
+        d_dir = os.path.join(dest, proj)
+        d = os.path.join(d_dir, os.path.basename(s))
+        try:
+            ss = os.stat(s)
+            if os.path.exists(d):
+                ds = os.stat(d)
+                if ds.st_size == ss.st_size and int(ds.st_mtime) >= int(ss.st_mtime):
+                    same += 1
+                    continue
+                upd += 1
+            else:
+                new += 1
+            os.makedirs(d_dir, exist_ok=True)
+            shutil.copy2(s, d)
+        except OSError as e:
+            if not quiet:
+                print(f"  skip {os.path.basename(s)}: {e}")
+    total = len(glob.glob(os.path.join(dest, "*", "*.jsonl")))
+    if not quiet:
+        print(f"recall archive → {dest}\n  +{new} new, ~{upd} updated, ={same} unchanged; "
+              f"{total} transcripts archived (append-only; deleted originals stay here)")
 
 
 def main():
@@ -1088,6 +1202,9 @@ def main():
         cmd_doctor()
     elif args[0] in ("regroup", "recolor"):
         cmd_regroup()
+    elif args[0] == "archive":
+        rest = [a for a in args[1:] if not a.startswith("-")]
+        cmd_archive(rest[0] if rest else None, quiet="--quiet" in args)
     else:
         sys.exit(USAGE.replace("{VERSION}", VERSION))
 
