@@ -23,7 +23,7 @@ import re
 import subprocess
 import sys
 
-VERSION = "0.5.16"
+VERSION = "0.5.17"
 DATA = os.environ.get("RECALL_DATA", os.path.expanduser("~/.claude/session-recaps"))
 MODEL = os.environ.get("RECALL_MODEL", "claude-haiku-4-5-20251001")
 MIN_EVENTS = int(os.environ.get("RECALL_MIN_EVENTS", "15"))
@@ -37,6 +37,8 @@ AUTONAMED = os.path.join(DATA, ".autonamed")  # id8 per line; titles we set (man
 AUTONAME = os.environ.get("RECALL_AUTONAME", "1") != "0"
 SESSIONS_DIR = os.path.expanduser("~/.claude/sessions")
 ARCHIVE = os.path.expanduser(os.environ.get("RECALL_ARCHIVE", "~/backups/claude-transcripts"))  # durable, append-only transcript backup OUT of the prune zone
+ITERMQ = os.path.expanduser("~/.claude/recall/itermq")            # iTerm bridge job queue (0700); must match iterm_bridge.py
+ITERM_AUDIT = os.path.expanduser("~/.claude/recall/iterm-audit.log")
 
 # fallback dirs only — appended, so the user's PATH order always wins
 for d in ("~/.npm-global/bin", "/opt/homebrew/bin", "/usr/local/bin", "~/.local/bin"):
@@ -1063,6 +1065,13 @@ USAGE = """recall {VERSION} — session memory & orchestration for Claude Code
   recall archive [dest]         durable append-only backup of every transcript jsonl OUT
                   [--quiet]      of the prune zone (default ~/backups/claude-transcripts);
                                  deleted originals stay recoverable here
+  recall iterm-install          install the iTerm2 bridge into AutoLaunch (then enable
+                                Python API in iTerm2 Settings → General → Magic + restart)
+  recall ps                     list open Claude sessions by tty (via iTerm2 bridge)
+  recall peek <ttyNNN> [lines]  read the current screen of one session
+  recall send <ttyNNN> <text…>  send a prompt to ONE session (never broadcast; audited;
+                                requires claude running on that tty)
+  recall wait <ttyNNN> [secs]   block until that session goes idle (screen stabilises)
   recall regroup                iTerm: recolour every open tab so each project folder
                                 gets a DISTINCT colour (set-aware; no hash collisions)
 
@@ -1153,6 +1162,105 @@ def cmd_archive(dest=None, quiet=False):
               f"{total} transcripts archived (append-only; deleted originals stay here)")
 
 
+# ── iTerm2 bridge client (addressable per-session control via a local queue) ──
+
+def _iterm_job(op, wait_result=30.0, **fields):
+    """Drop a job in the 0700 queue and wait for the bridge (running inside iTerm2)
+    to write a result. The CLI never touches the iTerm2 API directly — no auth needed."""
+    import time
+    os.makedirs(ITERMQ, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(ITERMQ, 0o700)
+    except OSError:
+        pass
+    jid = f"{int(time.time() * 1000)}-{os.getpid()}"
+    jf = os.path.join(ITERMQ, jid + ".job.json")
+    rf = os.path.join(ITERMQ, jid + ".result.json")
+    tmp = jf + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"id": jid, "op": op, **fields}, f, ensure_ascii=False)
+    os.replace(tmp, jf)
+    deadline = time.time() + wait_result
+    while time.time() < deadline:
+        if os.path.exists(rf):
+            try:
+                with open(rf, encoding="utf-8") as f:
+                    res = json.load(f)
+            except Exception:
+                res = None
+            for p in (rf, jf):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+            if res is not None:
+                return res
+        time.sleep(0.2)
+    try:
+        os.remove(jf)
+    except OSError:
+        pass
+    return {"ok": False, "error": "iterm-bridge not responding — enable iTerm2 Python API "
+            "(Settings → General → Magic) + restart iTerm2, and run `recall iterm-install`"}
+
+
+def cmd_iterm_ps():
+    r = _iterm_job("ps")
+    if not r.get("ok"):
+        sys.exit("recall: " + r.get("error", "?"))
+    rows = sorted(r.get("sessions", []), key=lambda d: d.get("short", ""))
+    print(f"{'TTY':<6} {'CLAUDE':<7} {'SESSION':<10} FOLDER · TITLE")
+    for d in rows:
+        cl = "yes" if d.get("claude") else "—"
+        sid = (d.get("claude_sid") or "")[:8]
+        base = os.path.basename((d.get("cwd") or "").rstrip("/")) or "?"
+        print(f"{d.get('short',''):<6} {cl:<7} {sid:<10} {base} · {d.get('title','')}")
+
+
+def cmd_iterm_peek(tty, lines=40):
+    r = _iterm_job("peek", tty=tty, lines=lines)
+    if not r.get("ok"):
+        sys.exit("recall: " + r.get("error", "?"))
+    hdr = f"[{r.get('tty')}] claude={'yes' if r.get('claude') else '—'} {(r.get('claude_sid') or '')[:8]} {r.get('cwd','')}"
+    print(hdr + "\n" + "─" * min(len(hdr), 80) + "\n" + r.get("screen", ""))
+
+
+def cmd_iterm_send(tty, text):
+    r = _iterm_job("send", tty=tty, text=text, wait_result=15.0)
+    if not r.get("ok"):
+        sys.exit("recall: " + r.get("error", "?"))
+    print(f"✓ sent to {r.get('tty')} (claude {(r.get('claude_sid') or '?')[:8]})")
+
+
+def cmd_iterm_wait(tty, timeout=300):
+    r = _iterm_job("wait", tty=tty, timeout=timeout, wait_result=timeout + 15)
+    if not r.get("ok"):
+        sys.exit("recall: " + r.get("error", "?"))
+    state = "idle" if r.get("idle") else "timeout (still busy)"
+    print(f"[{r.get('tty')}] {state} — last screen:\n" + r.get("screen", ""))
+
+
+def cmd_iterm_install():
+    import shutil
+    al = os.path.expanduser("~/Library/Application Support/iTerm2/Scripts/AutoLaunch")
+    os.makedirs(al, exist_ok=True)
+    here = os.path.dirname(os.path.realpath(__file__))  # realpath: resolve the ~/.local/bin symlink
+    cands = [os.path.join(here, "iterm_bridge.py"),
+             os.path.expanduser("~/.claude/recall/bin/iterm_bridge.py"),
+             os.path.expanduser("~/dev/claude-recall/bin/iterm_bridge.py")]
+    src = next((c for c in cands if os.path.exists(c)), None)
+    if not src:
+        sys.exit("recall: iterm_bridge.py not found (looked in: " + ", ".join(cands) + ")")
+    dst = os.path.join(al, "recall_iterm_bridge.py")
+    shutil.copy2(src, dst)
+    print(f"✓ installed bridge → {dst}")
+    print("Next:")
+    print("  1. iTerm2 → Settings → General → Magic → ✅ Enable Python API")
+    print("     (do NOT tick 'Allow all apps to connect')")
+    print("  2. Restart iTerm2 (bridge auto-launches; approve it once if asked)")
+    print("  3. Verify:  recall ps")
+
+
 def main():
     args = sys.argv[1:]
     if not args or args[0] in ("-h", "--help", "help"):
@@ -1205,6 +1313,16 @@ def main():
     elif args[0] == "archive":
         rest = [a for a in args[1:] if not a.startswith("-")]
         cmd_archive(rest[0] if rest else None, quiet="--quiet" in args)
+    elif args[0] == "ps":
+        cmd_iterm_ps()
+    elif args[0] == "peek" and len(args) > 1:
+        cmd_iterm_peek(args[1], int(args[2]) if len(args) > 2 and args[2].isdigit() else 40)
+    elif args[0] == "send" and len(args) > 2:
+        cmd_iterm_send(args[1], " ".join(args[2:]))
+    elif args[0] == "wait" and len(args) > 1:
+        cmd_iterm_wait(args[1], int(args[2]) if len(args) > 2 and args[2].isdigit() else 300)
+    elif args[0] in ("iterm-install", "iterm_install"):
+        cmd_iterm_install()
     else:
         sys.exit(USAGE.replace("{VERSION}", VERSION))
 

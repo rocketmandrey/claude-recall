@@ -31,6 +31,7 @@ command -v claude  >/dev/null || { echo "✗ claude CLI required (https://code.c
 # 1. CLI
 mkdir -p "$RECALL_HOME/bin" "$HOME/.local/bin" "$HOME/.claude/session-recaps"
 cp "$REPO_DIR/bin/recall" "$RECALL_HOME/bin/recall"
+cp "$REPO_DIR/bin/iterm_bridge.py" "$RECALL_HOME/bin/iterm_bridge.py"   # iTerm2 API bridge (install into AutoLaunch via: recall iterm-install)
 chmod +x "$RECALL_HOME/bin/recall"
 ln -sf "$RECALL_HOME/bin/recall" "$BIN_LINK"
 case ":$PATH:" in
