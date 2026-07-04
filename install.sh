@@ -89,16 +89,21 @@ def scrub(event, *needles):
 ends = scrub("SessionEnd", "recall hook", "session_end_hook.sh")
 ends.append({"hooks": [{"type": "command", "command": f"{rbin} hook", "timeout": 15}]})
 
+# Stop hook: transcript backup after EVERY turn — sessions that die dirty
+# (power loss, hard kill) lose at most the last unfinished turn.
+stops = scrub("Stop", "recall backup-hook")
+stops.append({"hooks": [{"type": "command", "command": f"{rbin} backup-hook", "timeout": 15}]})
+
 pre = scrub("PreCompact", "recall handoff-hook")
 ss = scrub("SessionStart", "recall restore-hook")
 if handoff:
     for m in ("auto", "manual"):
         pre.append({"matcher": m, "hooks": [{"type": "command",
-                    "command": f"{rbin} handoff-hook", "timeout": 120}]})
+                    "command": f"{rbin} handoff-hook", "timeout": 200}]})
     for m in ("compact", "resume"):
         ss.append({"matcher": m, "hooks": [{"type": "command",
                    "command": f"{rbin} restore-hook", "timeout": 10}]})
-for ev in ("PreCompact", "SessionStart", "SessionEnd"):
+for ev in ("PreCompact", "SessionStart", "SessionEnd", "Stop"):
     if ev in hooks and not hooks[ev]:
         del hooks[ev]
 
@@ -137,6 +142,37 @@ else:
     json.dump(settings, open(settings_path, "w"), indent=2, ensure_ascii=False)
     print("  ✓ status line -> " + settings_path)
 PY
+
+# 4c. LaunchAgent (macOS): 30-min `recall sweep` — crash-first registry upkeep.
+# Sessions that die dirty (power loss) never fire SessionEnd; the sweep archives
+# transcripts, gives every unindexed session a zero-LLM [new] index line, and
+# catches up stale recaps/handoffs (capped). Идемпотентно: перезаписывает свой plist.
+if [[ "$(uname)" == "Darwin" ]]; then
+  PLIST="$HOME/Library/LaunchAgents/com.andrey.recall-archive.plist"
+  mkdir -p "$HOME/Library/LaunchAgents"
+  cat > "$PLIST" <<PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.andrey.recall-archive</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$HOME/.local/bin/recall</string>
+        <string>sweep</string>
+        <string>--quiet</string>
+    </array>
+    <key>StartInterval</key><integer>1800</integer>
+    <key>RunAtLoad</key><true/>
+    <key>StandardOutPath</key><string>$HOME/.claude/recall/sweep.log</string>
+    <key>StandardErrorPath</key><string>$HOME/.claude/recall/sweep.log</string>
+</dict>
+</plist>
+PLISTEOF
+  launchctl unload "$PLIST" 2>/dev/null || true
+  launchctl load "$PLIST" 2>/dev/null && echo "  ✓ LaunchAgent: recall sweep every 30 min" \
+    || echo "  • LaunchAgent written ($PLIST); load manually: launchctl load $PLIST"
+fi
 
 # 5. Verify
 echo

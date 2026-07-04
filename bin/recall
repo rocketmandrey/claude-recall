@@ -23,13 +23,15 @@ import re
 import subprocess
 import sys
 
-VERSION = "0.5.17"
+VERSION = "0.6.0"
 DATA = os.environ.get("RECALL_DATA", os.path.expanduser("~/.claude/session-recaps"))
 MODEL = os.environ.get("RECALL_MODEL", "claude-haiku-4-5-20251001")
 MIN_EVENTS = int(os.environ.get("RECALL_MIN_EVENTS", "15"))
 PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
 RECAP_MARKER = "SESSION-RECAP-WORKER"  # recap worker sessions carry it; never recap them
-LOG = "/tmp/recall.log"
+# NOT /tmp: macOS clears it on reboot — the error history died with the same
+# reboot that killed the sessions it would have explained
+LOG = os.path.expanduser(os.environ.get("RECALL_LOG", "~/.claude/recall/recall.log"))
 REMOVED = os.path.join(DATA, ".removed")  # id8 per line; recap/backfill skip these
 HANDOFFS = os.path.join(DATA, "handoffs")
 HANDOFF_DAYS = int(os.environ.get("RECALL_HANDOFF_DAYS", "30"))
@@ -89,8 +91,19 @@ def parse_transcript(path):
     urls = [u for u in urls if not (u in seen or seen.add(u))]
     urls.sort(key=lambda u: 0 if re.search(r"docs\.google|sheets|pages\.dev|notion", u) else 1)
     return {"cwd": cwd or "?", "first_ts": (first_ts or "")[:10], "last_ts": (last_ts or "")[:10],
-            "n": n, "skills": sorted(skills), "urls": urls[:8],
+            "last_iso": last_ts or "", "n": n, "skills": sorted(skills), "urls": urls[:8],
             "user_msgs": user_msgs, "ai_texts": ai_texts}
+
+
+def ts_local(iso):
+    """ISO UTC timestamp -> local sortable 'YYYY-MM-DDTHH:MM'. Time-of-day in the
+    index is what breaks same-day ties between sessions of one project — date-only
+    lines made `find` pick an arbitrary (often older) sibling."""
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%dT%H:%M")
+    except ValueError:
+        return (iso or "")[:10]
 
 
 def build_digest(t, tail=False):
@@ -128,12 +141,23 @@ def run_claude(prompt):
     return re.sub(r"^```[a-z]*\n?|\n?```$", "", r.stdout.strip()).strip()
 
 
+def tag_vocab():
+    """Curated tag vocabulary from DATA/TAGS.md (lines starting with #tag)."""
+    p = os.path.join(DATA, "TAGS.md")
+    if not os.path.exists(p):
+        return []
+    return re.findall(r"^#([\wЀ-ӿ-]+)", open(p, encoding="utf-8").read(), re.M)
+
+
 def call_llm(digest):
-    prompt = f"""[{RECAP_MARKER}] Generate a recap card for an AI coding session. Output strict YAML only — no markdown fences, no commentary. Write task/method/next in the SAME language the session itself is in. Fields:
+    vocab = tag_vocab()
+    vhint = ("; PREFER these existing tags: " + " ".join("#" + v for v in vocab[:60])) if vocab else ""
+    prompt = f"""[{RECAP_MARKER}] Generate a recap card for an AI coding session. Output strict YAML only — no markdown fences, no commentary. Write task/method/next in the SAME language the session itself is in. entities/tags/artifacts MUST be one-line flow lists like [a, b]. Fields:
 task: one line — what the task was (concretely: who/what/for whom)
 status: done | in_progress | aborted
 method: how it was solved (skill/script/approach), one line; null if unclear
 entities: [people, companies, systems mentioned — for search]
+tags: [1-3 lowercase kebab-case topic tags{vhint}]
 artifacts: [only actually produced results — sheet/page URLs, file paths]
 next: what remains to be done, one line; null if complete
 
@@ -142,12 +166,47 @@ Session digest:
     return run_claude(prompt)
 
 
+def yaml_list(text, key):
+    """Value of a YAML list field as 'a, b' — BOTH flow style (`key: [a, b]`) and
+    block style (`key:` + `  - a` lines). haiku emits either; the old flow-only
+    regex silently dropped entities from 2/3 of index lines, gutting search."""
+    m = re.search(rf"^{key}:\s*\[(.*?)\]", text, re.M | re.S)
+    if m:
+        return " ".join(m.group(1).split())
+    m = re.search(rf"^{key}:\s*\n((?:[ \t]+-[^\n]*\n?)+)", text, re.M)
+    if not m:
+        return ""
+    items = [re.sub(r"^\s*-\s*", "", l).strip().strip("'\"") for l in m.group(1).splitlines()]
+    return ", ".join(i for i in items if i)
+
+
+def norm_tag(s):
+    s = re.sub(r"[\s_]+", "-", s.strip().strip("'\"#«»").lower())
+    return re.sub(r"[^\wЀ-ӿ-]", "", s)
+
+
+def is_meta(t, task=""):
+    """A session ABOUT finding/driving other sessions (orchestrator). Its recap
+    carries the very keywords being searched («найти сессию про портал…») and
+    shadows the real work session in `find` — mark it so the scorer demotes it."""
+    if "session-orchestrator" in t.get("skills", ()):
+        return True
+    if re.search(r"(найти|найди|восстанови|возобнови|подними|открой|открыть|resume|find)\w*\s+"
+                 r"(мне\s+)?сесси", task, re.I):
+        return True
+    return any(re.search(r"\brecall (find|open|cmd|send|peek)\b", x) for x in t.get("ai_texts", ()))
+
+
 def index_line(session_id, t, yaml_text):
     grab = lambda k: (re.search(rf"^{k}:\s*(.+)$", yaml_text, re.M) or [None, ""])[1].strip()
-    ents = re.search(r"^entities:\s*\[(.*?)\]", yaml_text, re.M | re.S)
-    proj = os.path.basename(t["cwd"].rstrip("/")) or t["cwd"]
-    return (f"{session_id[:8]} {t['last_ts']} {proj} [{grab('status') or '?'}] "
-            f"{grab('task')} {{{ents.group(1).strip() if ents else ''}}}")
+    ents = yaml_list(yaml_text, "entities")
+    tags = " ".join(f"#{norm_tag(x)}" for x in yaml_list(yaml_text, "tags").split(",") if norm_tag(x))
+    # underscores keep the project a single token: «Колл Центр » split the column
+    proj = re.sub(r"\s+", "_", os.path.basename(t["cwd"].rstrip("/")) or t["cwd"])
+    stamp = ts_local(t["last_iso"]) if t.get("last_iso") else t["last_ts"]
+    meta = "(meta) " if is_meta(t, grab("task")) else ""
+    return (f"{session_id[:8]} {stamp} {proj} [{grab('status') or '?'}] {meta}"
+            f"{grab('task')}{' ' + tags if tags else ''} {{{ents}}}")
 
 
 def update_index(session_id, line):
@@ -483,6 +542,7 @@ def cmd_handoff_hook():
         cmd_handoff(transcript)
         prune_handoffs()
     except Exception as e:
+        os.makedirs(os.path.dirname(LOG), exist_ok=True)
         with open(LOG, "a") as log:
             log.write(f"handoff-hook: {e}\n")
 
@@ -526,15 +586,79 @@ def resume_command(id_prefix):
 
 # ── commands ────────────────────────────────────────────────────────────
 
+def live_sessions():
+    """sessionId -> pid for sessions whose Claude process is ALIVE right now.
+    ~/.claude/sessions/<pid>.json entries outlive their process (stale after a
+    crash/reboot, pids get reused), so require the pid to be running AND still
+    look like a claude/node process."""
+    reg = {}
+    for p in glob.glob(os.path.join(SESSIONS_DIR, "*.json")):
+        pid = os.path.basename(p).split(".")[0]
+        if not pid.isdigit():
+            continue
+        try:
+            sid = json.load(open(p, encoding="utf-8")).get("sessionId")
+        except Exception:
+            continue
+        if sid:
+            reg[int(pid)] = sid
+    if not reg:
+        return {}
+    try:
+        r = subprocess.run(["/bin/ps", "-p", ",".join(map(str, reg)), "-o", "pid=,comm="],
+                           capture_output=True, text=True, timeout=5)
+    except Exception:
+        return {}
+    out = {}
+    for line in r.stdout.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[0].isdigit() and re.search(r"(claude|node)", parts[1]):
+            out[reg[int(parts[0])]] = int(parts[0])
+    return out
+
+
 def cmd_find(terms):
-    pat = re.compile("|".join(re.escape(t) for t in terms), re.I)
+    """Scored search, not plain OR: task words weigh 3, #tags/{entities} 2, project 1;
+    (meta)/#meta lines are demoted so «найди сессию…» finder-sessions never shadow
+    the real work. Live sessions are flagged ⚡LIVE — resume those and you fork them."""
     idx = os.path.join(DATA, "INDEX.md")
     if not os.path.exists(idx):
-        sys.exit("recall: no index yet — run `recall backfill` first")
-    hits = [l for l in open(idx, encoding="utf-8") if pat.search(l)]
-    hits.sort(key=lambda l: l.split()[1] if len(l.split()) > 1 else "", reverse=True)
-    print("".join(hits) or "no matches in index; try other word stems, or full-text:\n"
-          f"  recall grep {' '.join(terms)}")
+        sys.exit("recall: no index yet — run `recall sweep` first")
+    live8 = {s[:8] for s in live_sessions()}
+    terms_l = [t.lower() for t in terms]
+    scored = []
+    for l in open(idx, encoding="utf-8"):
+        if not l.strip():
+            continue
+        parts = l.split()
+        proj = parts[2].lower() if len(parts) > 2 else ""
+        tagzone = " ".join(re.findall(r"#[\wЀ-ӿ-]+", l)).lower()
+        m = re.search(r"\{(.*)\}", l)
+        tagzone += " " + (m.group(1).lower() if m else "")
+        taskzone = re.sub(r"\{.*\}|#[\wЀ-ӿ-]+", "", l.split("]", 1)[1] if "]" in l else l).lower()
+        score = 0
+        for t in terms_l:
+            if t in taskzone:
+                score += 3
+            elif t in tagzone:
+                score += 2
+            elif t in proj:
+                score += 1
+        if score and ("(meta)" in l or "#meta" in tagzone):
+            score -= 2  # a strong task match still surfaces, weak ones drop
+        if score <= 0:
+            continue
+        date = parts[1] if len(parts) > 1 else ""
+        scored.append((score, date, l.rstrip() + ("  ⚡LIVE" if parts[0] in live8 else "")))
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    if not scored:
+        print("no matches in index; try other word stems, or full-text:\n"
+              f"  recall grep {' '.join(terms)}")
+        return
+    for s, d, l in scored[:25]:
+        print(l)
+    if len(scored) > 25:
+        print(f"(+{len(scored) - 25} more)")
 
 
 def cmd_grep(terms):
@@ -606,7 +730,22 @@ def _session_cwd(jsonl_path):
     return None
 
 
-def cmd_open(id_prefix, fast=False, tab=False):
+def _live_guard(sid, force):
+    """True = stop: this session's claude is RUNNING somewhere right now. A second
+    `--resume` of a live session double-writes its jsonl and forks the context —
+    the classic «восстановили не ту / контекст откатился» corruption."""
+    if force:
+        return False
+    pid = live_sessions().get(sid)
+    if not pid:
+        return False
+    print(f"⚠ сессия {sid[:8]} УЖЕ ОТКРЫТА (pid {pid}) — второй resume раздвоит её контекст.")
+    print("  Адресно: recall ps → recall peek/send <tty>. Всё равно открыть: recall open "
+          f"{sid[:8]} --force")
+    return True
+
+
+def cmd_open(id_prefix, fast=False, tab=False, force=False):
     # resolve via recall card when one exists; otherwise fall back to a cardless
     # resume by raw jsonl id (forks and freshly-spawned sessions have no card yet).
     try:
@@ -625,12 +764,16 @@ def cmd_open(id_prefix, fast=False, tab=False):
                 print("nothing found under ~/.claude/projects for that id.")
             return
         sid = os.path.basename(g[0])[:-len(".jsonl")]
+        if _live_guard(sid, force):
+            return
         tr = [g[0]]
         project = _session_cwd(g[0]) or ""
         if not project:
             print(f"open: cannot determine cwd for '{sid[:8]}'"); return
         title = session_title(project, "сессия")
     else:
+        if _live_guard(sid, force):
+            return
         tr = glob.glob(os.path.join(PROJECTS_DIR, "*", f"{sid}.jsonl"))
         if not tr:
             print(f"⚠ recall: card exists for {sid[:8]} but its transcript .jsonl is DELETED "
@@ -975,10 +1118,24 @@ def cmd_hook():
     subs = ["recap"]
     if handoff_enabled():  # handoff too: a spawn-resumed session wakes up informed
         subs.append("handoff")
+    os.makedirs(os.path.dirname(LOG), exist_ok=True)
     with open(LOG, "a") as log:
         for sub in subs:
             subprocess.Popen([sys.executable, os.path.abspath(__file__), sub, transcript],
                              stdout=log, stderr=log, start_new_session=True)
+
+
+def cmd_backup_hook():
+    """Stop entrypoint: back up THIS session's transcript after every turn. Closes the
+    gap between the 30-min archive sweep and the compact/SessionEnd hooks — an unclean
+    death (folder moved/trashed, hard kill) before either still leaves a fresh copy.
+    Cheap: archive_one is incremental (copies only on size/mtime change). Never blocks."""
+    try:
+        transcript = json.load(sys.stdin).get("transcript_path", "")
+    except Exception:
+        return
+    if os.path.isfile(transcript):
+        archive_one(transcript)
 
 
 def cmd_backfill(days=180, min_events=25, jobs=4):
@@ -1006,6 +1163,172 @@ def cmd_backfill(days=180, min_events=25, jobs=4):
     print("backfill done")
 
 
+def card_paths():
+    """Recap cards only — DATA also holds INDEX.md / TAGS.md, which are not cards."""
+    return [p for p in glob.glob(os.path.join(DATA, "*.md"))
+            if re.fullmatch(r"[0-9a-f-]{32,}\.md", os.path.basename(p))]
+
+
+def first_user_line(path, cap=110):
+    """First real user message of a transcript, streamed cheaply (stops early).
+    None => recap-worker session (skip it entirely)."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if '"type":"user"' not in line and '"type": "user"' not in line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                c = (e.get("message") or {}).get("content")
+                if isinstance(c, list):  # content blocks — take the first text block
+                    c = next((b.get("text", "") for b in c
+                              if isinstance(b, dict) and b.get("type") == "text"), "")
+                if isinstance(c, str) and c.strip():
+                    if RECAP_MARKER in c:
+                        return None
+                    if c.startswith("<") or c.startswith("Caveat:"):
+                        continue
+                    c = re.sub(r"\s+", " ", c).strip()
+                    return c[:cap] + ("…" if len(c) > cap else "")
+    except OSError:
+        pass
+    return ""
+
+
+def cmd_sweep(days=14, llm=True, max_llm=8, quiet=False):
+    """Crash-first registry maintenance, built for sessions that NEVER end cleanly
+    (ноут отрубается — SessionEnd не срабатывает). Every run (LaunchAgent, 30 min):
+      1. archive       — incremental transcript backup (what `recall archive` did)
+      2. cheap lines   — every substantial transcript missing from INDEX gets a
+                         zero-LLM [new] line NOW (id, local time, project, first
+                         user request) => `find` sees a crashed session immediately
+      3. LLM catch-up  — up to max_llm haiku calls: recap sessions with no card or
+                         a card ≥1h staler than the transcript; same for handoffs
+      4. prune         — expire old handoff cards
+    Self-quiescing (fresh cards → no LLM calls) and overlap-safe (flock)."""
+    import time
+    os.makedirs(DATA, exist_ok=True)
+    say = (lambda *a: None) if quiet else print
+    lock = open(os.path.join(DATA, ".sweep.lock"), "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        say("sweep already running")
+        return
+    cmd_archive(quiet=True)
+    cutoff = time.time() - days * 86400
+    removed = removed_ids()
+    idx_path = os.path.join(DATA, "INDEX.md")
+    idx_lines = [l for l in open(idx_path, encoding="utf-8").read().splitlines() if l.strip()] \
+        if os.path.exists(idx_path) else []
+    idx_ids = {l.split()[0] for l in idx_lines}
+    idx_new = {l.split()[0] for l in idx_lines if " [new] " in l}
+    carded = {os.path.basename(p)[:8] for p in card_paths()}
+    fresh = []
+    for path in glob.glob(os.path.join(PROJECTS_DIR, "*", "*.jsonl")):
+        sid = os.path.basename(path)[:-len(".jsonl")]
+        if sid.startswith("agent-") or sid[:8] in removed or os.path.getmtime(path) < cutoff:
+            continue
+        la = last_activity(path)
+        if la < cutoff:
+            continue
+        with open(path, errors="replace") as f:
+            if sum(1 for _ in f) < MIN_EVENTS:
+                continue
+        fresh.append((la, path, sid))
+    fresh.sort(reverse=True)
+    new_lines = 0
+    from datetime import datetime
+    for la, path, sid in fresh:
+        if sid[:8] in carded or (sid[:8] in idx_ids and sid[:8] not in idx_new):
+            continue
+        first = first_user_line(path)
+        if first is None:
+            continue
+        proj = re.sub(r"\s+", "_", os.path.basename((_session_cwd(path) or "?").rstrip("/")))
+        stamp = datetime.fromtimestamp(la).strftime("%Y-%m-%dT%H:%M")
+        update_index(sid, f"{sid[:8]} {stamp} {proj} [new] {first} {{}}")
+        new_lines += 1
+    done_llm = 0
+    if llm and os.environ.get("RECALL_SWEEP_LLM", "1") != "0":
+        stale = 3600
+        for la, path, sid in fresh:
+            if done_llm >= max_llm:
+                break
+            card = os.path.join(DATA, f"{sid}.md")
+            try:
+                if not os.path.exists(card):
+                    cmd_recap(path)
+                    done_llm += 1
+                elif la - os.path.getmtime(card) > stale:
+                    cmd_recap(path, force=True)
+                    done_llm += 1
+                hp = os.path.join(HANDOFFS, f"{sid}.md")
+                if done_llm < max_llm and handoff_enabled() and \
+                        (not os.path.exists(hp) or la - os.path.getmtime(hp) > stale):
+                    cmd_handoff(path)
+                    done_llm += 1
+            except Exception as e:
+                os.makedirs(os.path.dirname(LOG), exist_ok=True)
+                with open(LOG, "a") as log:
+                    log.write(f"sweep {sid[:8]}: {e}\n")
+    prune_handoffs()
+    say(f"sweep: {len(fresh)} fresh sessions, +{new_lines} cheap [new] lines, "
+        f"{done_llm} LLM catch-ups (cap {max_llm})")
+
+
+def cmd_reindex():
+    """Rebuild INDEX.md from every recap card, no LLM: v2 lines with local time,
+    #tags and block-style entities — heals every line older recaps wrote. Cheap
+    [new] lines whose session has no card yet are kept as-is."""
+    idx_path = os.path.join(DATA, "INDEX.md")
+    old = [l for l in open(idx_path, encoding="utf-8").read().splitlines() if l.strip()] \
+        if os.path.exists(idx_path) else []
+    removed = removed_ids()
+    lines = {}
+    from datetime import datetime
+    for p in card_paths():
+        sid = os.path.basename(p)[:-len(".md")]
+        if sid[:8] in removed:
+            continue
+        text = open(p, encoding="utf-8").read()
+        grab = lambda k: (re.search(rf"^{k}:\s*(.+)$", text, re.M) or [None, ""])[1].strip()
+        tr = glob.glob(os.path.join(PROJECTS_DIR, "*", f"{sid}.jsonl"))
+        la = last_activity(tr[0]) if tr else os.path.getmtime(p)
+        stamp = datetime.fromtimestamp(la).strftime("%Y-%m-%dT%H:%M")
+        t = {"cwd": grab("project") or "?", "last_ts": stamp, "last_iso": "",
+             "skills": [], "ai_texts": []}
+        lines[sid[:8]] = index_line(sid, t, text)
+    for l in old:  # keep cheap lines that still have no card
+        id8 = l.split()[0]
+        if id8 not in lines and " [new] " in l and id8 not in removed:
+            lines[id8] = l
+    out = sorted(lines.values(), key=lambda l: l.split()[1] if len(l.split()) > 1 else "",
+                 reverse=True)
+    with open(idx_path, "a+", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.seek(0)
+        f.truncate()
+        f.write("\n".join(out) + "\n")
+    print(f"reindex: {len(out)} lines from {len(card_paths())} cards")
+
+
+def cmd_tags():
+    from collections import Counter
+    p = os.path.join(DATA, "TAGS.md")
+    if os.path.exists(p):
+        print(open(p, encoding="utf-8").read().rstrip() + "\n")
+    else:
+        print("no TAGS.md yet — vocabulary is free-form until one exists\n")
+    idx = os.path.join(DATA, "INDEX.md")
+    counts = Counter(re.findall(r"#([\wЀ-ӿ-]+)", open(idx, encoding="utf-8").read())) \
+        if os.path.exists(idx) else Counter()
+    print("usage in INDEX: " + ("  ".join(f"#{t}×{c}" for t, c in counts.most_common(40))
+                                or "no tags yet"))
+
+
 def cmd_doctor():
     import shutil
     ok = lambda c, msg: print(("  ✓ " if c else "  ✗ ") + msg) or bool(c)
@@ -1024,6 +1347,30 @@ def cmd_doctor():
         ok(True, f"handoff loop: ON — {n_h} live handoffs (auto-pruned after {HANDOFF_DAYS} days)")
     else:
         ok(True, "handoff loop: off (optional — enable: ./install.sh --with-handoff)")
+    # coverage: a substantial recent transcript the index can't see = the exact
+    # session `find` will miss after a dirty death (the wrong-resume bug)
+    import time
+    cutoff = time.time() - 7 * 86400
+    idx_ids = {l.split()[0] for l in open(idx, encoding="utf-8") if l.strip()} \
+        if os.path.exists(idx) else set()
+    missing = 0
+    for path in glob.glob(os.path.join(PROJECTS_DIR, "*", "*.jsonl")):
+        b = os.path.basename(path)
+        if b.startswith("agent-") or os.path.getmtime(path) < cutoff:
+            continue
+        if b[:8] in idx_ids or b[:8] in removed_ids():
+            continue
+        with open(path, errors="replace") as f:
+            if sum(1 for _ in f) >= MIN_EVENTS:
+                if first_user_line(path) is None:  # recap-worker session — sweep skips it too
+                    continue
+                missing += 1
+    good &= ok(missing == 0, f"index coverage (7d): {missing} substantial sessions missing"
+               + (" — run `recall sweep`" if missing else ""))
+    if sys.platform == "darwin":
+        r = subprocess.run(["launchctl", "list", "com.andrey.recall-archive"],
+                           capture_output=True)
+        ok(r.returncode == 0, "LaunchAgent com.andrey.recall-archive loaded (30-min sweep)")
     sys.exit(0 if good else 1)
 
 
@@ -1039,14 +1386,24 @@ def cmd_index():
 
 USAGE = """recall {VERSION} — session memory & orchestration for Claude Code
 
-  recall find <query...>        search the index (case-insensitive, OR)
+  recall find <query...>        scored search: task×3 > #tags/entities×2 > project×1,
+                                recency breaks ties; (meta)/#meta demoted; live
+                                sessions flagged ⚡LIVE (address those, don't resume)
   recall grep <query...>        full-text search raw transcripts (fallback when index is silent)
   recall show <id8>             print a session's recap card
   recall cmd <id8>              print the resume command (handoff mode)
-  recall open <id8> [--fast]    open in a new terminal window (spawn); writes the
-                    [--tab]     session's missing handoff card first unless --fast;
+  recall open <id8> [--fast]    open in a new terminal window (spawn); refuses a
+                    [--tab]     session that is ALREADY live (--force overrides);
+                    [--force]   writes the missing handoff card first unless --fast;
                                 --tab opens a tab instead (Terminal.app needs the
                                 Accessibility permission; falls back to a window)
+  recall sweep [--days N (14)]  crash-first registry upkeep (LaunchAgent, 30 min):
+              [--no-llm]        archive + zero-LLM [new] index lines for unindexed
+              [--max-llm N (8)] sessions + capped recap/handoff catch-up for stale
+              [--quiet]         ones + prune (env RECALL_SWEEP_LLM=0 => no LLM ever)
+  recall reindex                rebuild INDEX.md from cards (no LLM): time-of-day,
+                                #tags, block-style entities healed
+  recall tags                   tag vocabulary (TAGS.md) + usage counts in INDEX
   recall fork <id8> --at-line N branch a NEW session from line N of <id8>'s
                   [--anchor T]  transcript (or last line containing T); opens it
                   [--window]    (RECALL_SEED_FILE seeds an initial prompt)
@@ -1058,6 +1415,7 @@ USAGE = """recall {VERSION} — session memory & orchestration for Claude Code
                                 [--days N (14)] [--jobs N (4)]
   recall backfill               recap existing sessions [--days N] [--min-events N] [--jobs N]
   recall hook                   SessionEnd hook entrypoint (reads JSON on stdin)
+  recall backup-hook            Stop hook entrypoint (stdin JSON; backs up this transcript)
   recall handoff-hook           PreCompact hook entrypoint (stdin JSON; sync)
   recall restore-hook           SessionStart hook entrypoint (stdin JSON; prints handoff)
   recall index                  index stats
@@ -1083,14 +1441,27 @@ env: RECALL_DATA, RECALL_MODEL, RECALL_ARCHIVE (~/backups/claude-transcripts —
      RECALL_TAB (1 — recall open defaults to tabs; per-call override: --window)"""
 
 
-def archive_one(path):
-    """Copy ONE transcript into ARCHIVE immediately (called on SessionEnd) so it survives
-    even if something deletes the original before the periodic `recall archive` sweep runs."""
+def _clone_or_copy(src, dst):
+    """APFS clonefile (cp -pc) when possible: instant CoW, no data moved, zero extra
+    disk while the original lives — yet a full independent copy that survives its
+    deletion. Falls back to a real copy off-APFS/cross-volume. Writes via a tmp +
+    atomic replace so a reader never sees a half-written backup."""
     import shutil
+    tmp = dst + ".tmp"
+    r = subprocess.run(["/bin/cp", "-pc", src, tmp], capture_output=True) \
+        if sys.platform == "darwin" else None
+    if r is None or r.returncode != 0:
+        shutil.copy2(src, tmp)
+    os.replace(tmp, dst)
+
+
+def archive_one(path):
+    """Copy ONE transcript into ARCHIVE immediately (Stop/SessionEnd/PreCompact) so it
+    survives even if something deletes the original before the periodic sweep runs."""
     try:
         d_dir = os.path.join(ARCHIVE, os.path.basename(os.path.dirname(path)))
         os.makedirs(d_dir, exist_ok=True)
-        shutil.copy2(path, os.path.join(d_dir, os.path.basename(path)))
+        _clone_or_copy(path, os.path.join(d_dir, os.path.basename(path)))
     except OSError:
         pass
 
@@ -1277,7 +1648,15 @@ def main():
         print(resume_command(args[1]))
     elif args[0] == "open" and len(args) > 1:
         tab = "--tab" in args or (os.environ.get("RECALL_TAB") == "1" and "--window" not in args)
-        cmd_open(args[1], fast="--fast" in args, tab=tab)
+        cmd_open(args[1], fast="--fast" in args, tab=tab, force="--force" in args)
+    elif args[0] == "sweep":
+        flag = lambda n, d: int(args[args.index(n) + 1]) if n in args else d
+        cmd_sweep(days=flag("--days", 14), llm="--no-llm" not in args,
+                  max_llm=flag("--max-llm", 8), quiet="--quiet" in args)
+    elif args[0] == "reindex":
+        cmd_reindex()
+    elif args[0] == "tags":
+        cmd_tags()
     elif args[0] == "fork" and len(args) > 1:
         flagv = lambda n: (args[args.index(n) + 1] if n in args and args.index(n) + 1 < len(args) else None)
         at = flagv("--at-line")
@@ -1300,6 +1679,8 @@ def main():
             cmd_handoff(args[1])
     elif args[0] == "hook":
         cmd_hook()
+    elif args[0] == "backup-hook":
+        cmd_backup_hook()
     elif args[0] == "handoff-hook":
         cmd_handoff_hook()
     elif args[0] == "restore-hook":
