@@ -23,11 +23,12 @@ import re
 import subprocess
 import sys
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 DATA = os.environ.get("RECALL_DATA", os.path.expanduser("~/.claude/session-recaps"))
 MODEL = os.environ.get("RECALL_MODEL", "claude-haiku-4-5-20251001")
 MIN_EVENTS = int(os.environ.get("RECALL_MIN_EVENTS", "15"))
 PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
+CODEX_DIR = os.path.expanduser("~/.codex/sessions")  # Codex CLI rollouts; see docs/codex-rollout-format.md
 RECAP_MARKER = "SESSION-RECAP-WORKER"  # recap worker sessions carry it; never recap them
 # NOT /tmp: macOS clears it on reboot — the error history died with the same
 # reboot that killed the sessions it would have explained
@@ -209,11 +210,13 @@ def index_line(session_id, t, yaml_text):
             f"{grab('task')}{' ' + tags if tags else ''} {{{ents}}}")
 
 
-def update_index(session_id, line):
+def update_index(session_id, line, id_len=8):
+    # id_len=13 for codex lines: id8 only encodes ~65s of uuid7 time, too coarse
+    # to dedup codex sessions safely (see docs/codex-rollout-format.md).
     with open(os.path.join(DATA, "INDEX.md"), "a+", encoding="utf-8") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         f.seek(0)
-        lines = [l for l in f.read().splitlines() if l.strip() and not l.startswith(session_id[:8])]
+        lines = [l for l in f.read().splitlines() if l.strip() and not l.startswith(session_id[:id_len])]
         lines.append(line)
         f.seek(0)
         f.truncate()
@@ -580,8 +583,118 @@ def card_meta(path):
 
 
 def resume_command(id_prefix):
-    m = card_meta(resolve_card(id_prefix))
-    return f'cd "{m["project"]}" && claude --resume {m["id"]}'
+    try:
+        m = card_meta(resolve_card(id_prefix))
+        return f'cd "{m["project"]}" && claude --resume {m["id"]}'
+    except SystemExit:
+        pass
+    c = resolve_codex(id_prefix)
+    if not c:
+        sys.exit(f"recall: no card for id '{id_prefix}' (try: recall find <query>)")
+    if not c["cwd"] or not os.path.isdir(c["cwd"]):
+        return f'⚠ cwd gone ({c["cwd"]}) — codex resume {c["session_id"]}'
+    return f'cd "{c["cwd"]}" && codex resume {c["session_id"]}'
+
+
+# ── Codex CLI sessions (docs/codex-rollout-format.md) ──────────────────
+#
+# Codex rollouts get zero-LLM index lines only — no recap cards, no handoff loop.
+# `codex resume <id>` APPENDS to the SAME rollout file (same session_id, another
+# session_meta line further down) rather than starting a new file — confirmed on
+# live data. One file = one session = one INDEX.md line, forever; a resume just
+# bumps the file's mtime and grows its content, it never needs re-indexing.
+
+AGENTS_PREFIX = "# AGENTS.md instructions for"
+
+
+def _codex_filename_id(path):
+    """Full session uuid straight from the rollout filename — the spec confirms
+    it always equals payload.session_id, so this is a zero-I/O id lookup."""
+    m = re.search(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$",
+                  os.path.basename(path))
+    return m.group(1) if m else None
+
+
+def _codex_paths():
+    """Every rollout file: the current YYYY/MM/DD tree plus the handful of flat
+    legacy files living directly under CODEX_DIR (oldest format generation)."""
+    return glob.glob(os.path.join(CODEX_DIR, "*", "*", "*", "rollout-*.jsonl")) + \
+           glob.glob(os.path.join(CODEX_DIR, "rollout-*.jsonl"))
+
+
+def codex_meta(path):
+    """One rollout -> dict(session_id, id13, ts_start, cwd, proj, first_task,
+    originator, empty). session_meta is always line 0 — later resumes append
+    MORE session_meta/event_msg lines further down but never rewrite line 0, so
+    identity/cwd/ts_start always come from the first line regardless of how many
+    times the file was resumed. User text prefers event_msg/user_message (already
+    AGENTS.md-inject-clean); older eras fall back to the raw response_item log,
+    skipping any text starting with the AGENTS.md injection prefix."""
+    try:
+        raw = open(path, encoding="utf-8", errors="replace").read().splitlines()
+    except OSError:
+        return None
+    lines = []
+    for l in raw:
+        l = l.strip()
+        if not l:
+            continue
+        try:
+            lines.append(json.loads(l))
+        except json.JSONDecodeError:
+            continue
+    if not lines:
+        return None
+    file_uuid = _codex_filename_id(path)
+    first = lines[0]
+    if "type" not in first:  # ancient flat 2-line format, no envelope at all
+        sid = first.get("id") or file_uuid
+        msgs = [m for m in lines[1:] if isinstance(m, dict) and m.get("type") == "message"]
+        texts = [((m.get("content") or [{}]))[0].get("text", "") for m in msgs if m.get("role") == "user"]
+        first_real = next((t for t in texts if not t.startswith(AGENTS_PREFIX)), None)
+        has_reply = any(m.get("role") == "assistant" for m in msgs)
+        # the known 213B/233B junk files: prompt logged, reply went to the caller's
+        # stdout instead (codex exec one-shot) — first_real exists but there's no
+        # reply, so empty must check BOTH, same rule as the main branch below.
+        return {"session_id": sid, "id13": (sid or file_uuid or "")[:13],
+                "ts_start": first.get("timestamp"), "cwd": None, "proj": "?",
+                "first_task": (first_real or "").strip(), "originator": None,
+                "empty": (first_real is None) or not has_reply}
+    meta = first.get("payload") or {}
+    sid = meta.get("session_id") or meta.get("id") or file_uuid
+    cwd = meta.get("cwd")
+    user_events = [l["payload"].get("message", "") for l in lines
+                   if l.get("type") == "event_msg" and (l.get("payload") or {}).get("type") == "user_message"]
+    if user_events:
+        first_real = user_events[0]
+    else:  # pre-event_msg era: fall back to the wire log, skip the AGENTS.md injection
+        cands = [((l["payload"].get("content") or [{}]))[0].get("text", "") for l in lines
+                 if l.get("type") == "response_item" and (l.get("payload") or {}).get("type") == "message"
+                 and l["payload"].get("role") == "user"]
+        first_real = next((c for c in cands if not c.startswith(AGENTS_PREFIX)), None)
+    has_reply = any(
+        (l.get("type") == "event_msg" and (l.get("payload") or {}).get("type") == "agent_message")
+        or (l.get("type") == "response_item" and (l.get("payload") or {}).get("type") == "message"
+            and (l.get("payload") or {}).get("role") == "assistant")
+        for l in lines)
+    return {"session_id": sid, "id13": (sid or "")[:13], "ts_start": first.get("timestamp"),
+            "cwd": cwd, "proj": os.path.basename((cwd or "").rstrip("/")) or "?",
+            "first_task": (first_real or "").strip(), "originator": meta.get("originator"),
+            "empty": (first_real is None) or not has_reply}
+
+
+def resolve_codex(id_prefix):
+    """No recap card exists for codex sessions — resolve straight off the rollout
+    filename (which IS the session_id)."""
+    hits = glob.glob(os.path.join(CODEX_DIR, "*", "*", "*", f"rollout-*{id_prefix}*.jsonl")) + \
+           glob.glob(os.path.join(CODEX_DIR, f"rollout-*{id_prefix}*.jsonl"))
+    if not hits:
+        return None
+    meta = codex_meta(hits[0])
+    if not meta:
+        return None
+    return {"path": hits[0], "session_id": meta["session_id"], "cwd": meta["cwd"],
+            "first_task": meta["first_task"]}
 
 
 # ── commands ────────────────────────────────────────────────────────────
@@ -617,6 +730,32 @@ def live_sessions():
     return out
 
 
+def codex_live_ids():
+    """id13 of Codex sessions that are almost certainly live right now. pgrep -fl
+    (NOT ps aux — that misreports args under the sandbox) finds any codex process;
+    an exact `resume <uuid>` in its cmdline pins that uuid as live for sure. Plus a
+    cheap heuristic: ANY codex process alive + a rollout mtime < 10 min => live."""
+    try:
+        r = subprocess.run(["pgrep", "-fl", "codex"], capture_output=True, text=True, timeout=5)
+    except Exception:
+        return set()
+    if not r.stdout.strip():
+        return set()
+    live = set()
+    for line in r.stdout.splitlines():
+        m = re.search(r"resume\s+([0-9a-f-]{36})", line)
+        if m:
+            live.add(m.group(1)[:13])
+    import time
+    recent = time.time() - 600
+    for path in _codex_paths():
+        if os.path.getmtime(path) >= recent:
+            fid = _codex_filename_id(path)
+            if fid:
+                live.add(fid[:13])
+    return live
+
+
 def cmd_find(terms):
     """Scored search, not plain OR: task words weigh 3, #tags/{entities} 2, project 1;
     (meta)/#meta lines are demoted so «найди сессию…» finder-sessions never shadow
@@ -624,7 +763,7 @@ def cmd_find(terms):
     idx = os.path.join(DATA, "INDEX.md")
     if not os.path.exists(idx):
         sys.exit("recall: no index yet — run `recall sweep` first")
-    live8 = {s[:8] for s in live_sessions()}
+    live8 = {s[:8] for s in live_sessions()} | codex_live_ids()
     terms_l = [t.lower() for t in terms]
     scored = []
     for l in open(idx, encoding="utf-8"):
@@ -745,6 +884,22 @@ def _live_guard(sid, force):
     return True
 
 
+def cmd_open_codex(c, tab=False, force=False):
+    """Spawn (or refuse to double-open) a codex session resolved by resolve_codex()."""
+    id13 = c["session_id"][:13]
+    if not force and id13 in codex_live_ids():
+        print(f"⚠ codex-сессия {id13} УЖЕ ОТКРЫТА — второй resume раздвоит её контекст.")
+        print(f"  Всё равно открыть: recall open {id13} --force")
+        return
+    cwd = c["cwd"]
+    if not cwd or not os.path.isdir(cwd):
+        print(f"open: cwd for codex session {id13} is gone ({cwd}) — resume by hand: "
+              f"codex resume {c['session_id']}")
+        return
+    shell_cmd = f'cd "{cwd}" && codex resume {c["session_id"]}'
+    open_in_terminal(shell_cmd, tab=tab, project=cwd, title=session_title(cwd, c.get("first_task") or "codex"))
+
+
 def cmd_open(id_prefix, fast=False, tab=False, force=False):
     # resolve via recall card when one exists; otherwise fall back to a cardless
     # resume by raw jsonl id (forks and freshly-spawned sessions have no card yet).
@@ -756,6 +911,10 @@ def cmd_open(id_prefix, fast=False, tab=False, force=False):
     if m is None:
         g = glob.glob(os.path.join(PROJECTS_DIR, "*", f"{id_prefix}*.jsonl"))
         if not g or not os.path.exists(g[0]):
+            c = resolve_codex(id_prefix)  # not a claude id at all — try codex before giving up
+            if c:
+                cmd_open_codex(c, tab=tab, force=force)
+                return
             print(f"open: no live transcript for '{id_prefix}'.")
             rep = orphan_artifacts(id_prefix)
             if rep:
@@ -1197,6 +1356,63 @@ def first_user_line(path, cap=110):
     return ""
 
 
+def _archive_codex(path):
+    """Clone one codex rollout into ARCHIVE/codex/ — same durable, append-only
+    backup archive_one() gives claude transcripts, mtime-aware re-copy included."""
+    dest_dir = os.path.join(ARCHIVE, "codex")
+    dst = os.path.join(dest_dir, os.path.basename(path))
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        if os.path.exists(dst):
+            ss, ds = os.stat(path), os.stat(dst)
+            if ds.st_size == ss.st_size and int(ds.st_mtime) >= int(ss.st_mtime):
+                return
+        _clone_or_copy(path, dst)
+    except OSError:
+        pass
+
+
+def sweep_codex(idx_ids):
+    """Codex-CLI half of `recall sweep`: same zero-LLM cheap-line philosophy as the
+    claude pass above, but no LLM catch-up at all (never requested) and a hard cap
+    of 50 new INDEX lines per run so a large backlog can't turn one sweep into a
+    marathon — the rest just waits for the next run. Only originator=='codex-tui'
+    (interactive TUI) sessions get indexed; codex_exec/batch callers are the codex
+    analogue of a subagent and are skipped, same as claude sub-agent transcripts."""
+    import time
+    from datetime import datetime
+    cutoff = time.time() - 30 * 86400  # fixed 30-day backfill window (not --days)
+    cands = []
+    for path in _codex_paths():
+        if os.path.getmtime(path) < cutoff:
+            continue
+        fid = _codex_filename_id(path)  # full uuid — idx_ids holds the 13-char id13
+        if not fid or fid[:13] in idx_ids:
+            continue
+        cands.append((os.path.getmtime(path), path))
+    cands.sort(reverse=True)  # most recent first, so the cap always favours recency
+    added = queued = 0
+    for mtime, path in cands:
+        meta = codex_meta(path)
+        if not meta or meta["empty"]:
+            continue
+        if meta["originator"] not in (None, "codex-tui"):
+            continue
+        _archive_codex(path)  # tui + non-empty: worth a durable backup regardless of the cap below
+        if added >= 50:
+            queued += 1
+            continue
+        stamp = datetime.fromtimestamp(mtime).strftime("%Y-%m-%dT%H:%M")
+        task = meta["first_task"][:110] + ("…" if len(meta["first_task"]) > 110 else "")
+        update_index(meta["session_id"], f"{meta['id13']} {stamp} {meta['proj']} [new] {task} #codex",
+                     id_len=13)
+        added += 1
+    if added or queued:
+        tail = f", {queued} остались (следующий sweep продолжит)" if queued else ""
+        print(f"codex backfill: added {added}{tail}")
+    return added, queued
+
+
 def cmd_sweep(days=14, llm=True, max_llm=8, quiet=False):
     """Crash-first registry maintenance, built for sessions that NEVER end cleanly
     (ноут отрубается — SessionEnd не срабатывает). Every run (LaunchAgent, 30 min):
@@ -1277,6 +1493,7 @@ def cmd_sweep(days=14, llm=True, max_llm=8, quiet=False):
     prune_handoffs()
     say(f"sweep: {len(fresh)} fresh sessions, +{new_lines} cheap [new] lines, "
         f"{done_llm} LLM catch-ups (cap {max_llm})")
+    sweep_codex(idx_ids)  # own summary line, printed even under --quiet iff it did something
 
 
 def cmd_reindex():
@@ -1388,10 +1605,12 @@ USAGE = """recall {VERSION} — session memory & orchestration for Claude Code
 
   recall find <query...>        scored search: task×3 > #tags/entities×2 > project×1,
                                 recency breaks ties; (meta)/#meta demoted; live
-                                sessions flagged ⚡LIVE (address those, don't resume)
+                                sessions flagged ⚡LIVE (address those, don't resume);
+                                #codex lines are Codex CLI sessions (id13, no card)
   recall grep <query...>        full-text search raw transcripts (fallback when index is silent)
   recall show <id8>             print a session's recap card
-  recall cmd <id8>              print the resume command (handoff mode)
+  recall cmd <id8>              print the resume command (handoff mode); id8 (claude,
+                                `claude --resume`) or id13 (codex, `codex resume`)
   recall open <id8> [--fast]    open in a new terminal window (spawn); refuses a
                     [--tab]     session that is ALREADY live (--force overrides);
                     [--force]   writes the missing handoff card first unless --fast;
@@ -1400,7 +1619,9 @@ USAGE = """recall {VERSION} — session memory & orchestration for Claude Code
   recall sweep [--days N (14)]  crash-first registry upkeep (LaunchAgent, 30 min):
               [--no-llm]        archive + zero-LLM [new] index lines for unindexed
               [--max-llm N (8)] sessions + capped recap/handoff catch-up for stale
-              [--quiet]         ones + prune (env RECALL_SWEEP_LLM=0 => no LLM ever)
+              [--quiet]         ones + prune (env RECALL_SWEEP_LLM=0 => no LLM ever);
+                                also backfills Codex CLI rollouts (~/.codex/sessions,
+                                30-day window, zero-LLM #codex lines, cap 50/run)
   recall reindex                rebuild INDEX.md from cards (no LLM): time-of-day,
                                 #tags, block-style entities healed
   recall tags                   tag vocabulary (TAGS.md) + usage counts in INDEX
@@ -1432,6 +1653,11 @@ USAGE = """recall {VERSION} — session memory & orchestration for Claude Code
   recall wait <ttyNNN> [secs]   block until that session goes idle (screen stabilises)
   recall regroup                iTerm: recolour every open tab so each project folder
                                 gets a DISTINCT colour (set-aware; no hash collisions)
+  recall to-codex <dir>         write <dir>/CODEX_HANDOFF.md (+ AGENTS.md if missing)
+       [--brief FILE|--task T] to hand a task off to Codex CLI: --brief copies a file,
+       [--spawn | --print]     --task wraps plain text in a mini template; --spawn
+                                opens an iTerm2 window running codex there (default:
+                                --print just shows the commands to run yourself)
 
 env: RECALL_DATA, RECALL_MODEL, RECALL_ARCHIVE (~/backups/claude-transcripts — durable transcript backup dir),
      RECALL_TERMINAL (Terminal|iTerm), RECALL_MIN_EVENTS,
@@ -1632,6 +1858,63 @@ def cmd_iterm_install():
     print("  3. Verify:  recall ps")
 
 
+AGENTS_MD_STUB = (
+    "Прочитай CODEX_HANDOFF.md первым делом — там контекст и задача от "
+    "Claude-оркестратора. Секреты в git не коммитить. Вопросы — Андрею прямо в сессии.\n"
+)
+
+
+def cmd_to_codex(directory, brief=None, task=None, spawn=False):
+    """Transition: hand a task off to Codex CLI. Writes CODEX_HANDOFF.md (from
+    --brief, copied verbatim, or --task, wrapped in a mini template) plus a minimal
+    AGENTS.md if the target dir doesn't already have one (an existing AGENTS.md is
+    never touched — just a reminder to reference the handoff by hand). --spawn opens
+    an iTerm2 window already running codex there; default --print just shows the
+    commands for a manual run."""
+    import shutil
+    import time
+    d = os.path.expanduser(directory)
+    if not os.path.isdir(d):
+        sys.exit(f"recall: '{d}' is not a directory")
+    handoff = os.path.join(d, "CODEX_HANDOFF.md")
+    if brief:
+        if not os.path.exists(brief):
+            sys.exit(f"recall: brief file '{brief}' not found")
+        shutil.copy2(brief, handoff)
+    elif task:
+        with open(handoff, "w", encoding="utf-8") as f:
+            f.write(f"# Handoff для Codex\nДата: {time.strftime('%Y-%m-%d %H:%M')}\n\n"
+                    f"## Задача\n{task}\n\n## Контекст\n(заполни)\n\n## Следующие шаги\n(заполни)\n")
+    else:
+        sys.exit('recall: to-codex needs --brief FILE or --task "текст"')
+    print(f"handoff -> {handoff}")
+    agents = os.path.join(d, "AGENTS.md")
+    if os.path.exists(agents):
+        print(f"AGENTS.md already exists ({agents}) — left untouched; "
+              "reference CODEX_HANDOFF.md in it yourself")
+    else:
+        with open(agents, "w", encoding="utf-8") as f:
+            f.write(AGENTS_MD_STUB)
+        print(f"AGENTS.md created -> {agents}")
+    prompt = "Прочитай CODEX_HANDOFF.md и AGENTS.md и приступай к задаче"
+    if spawn:
+        shell_cmd = f'cd "{d}" && codex "{prompt}"'
+        esc = shell_cmd.replace("\\", "\\\\").replace('"', '\\"')
+        script = ('tell application "iTerm2"\n'
+                  '  set newWin to (create window with default profile)\n'
+                  '  delay 1.5\n'
+                  f'  tell current session of newWin to write text "{esc}"\n'
+                  '  return tty of current session of newWin\n'
+                  'end tell')
+        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=15)
+        tty = (r.stdout or "").strip()
+        print(f"spawned iTerm2 window ({tty})" if tty else
+              f"spawn failed (osascript: {(r.stderr or '').strip()})")
+    else:
+        print("run yourself:")
+        print(f'  cd "{d}" && codex "{prompt}"')
+
+
 def main():
     args = sys.argv[1:]
     if not args or args[0] in ("-h", "--help", "help"):
@@ -1704,6 +1987,9 @@ def main():
         cmd_iterm_wait(args[1], int(args[2]) if len(args) > 2 and args[2].isdigit() else 300)
     elif args[0] in ("iterm-install", "iterm_install"):
         cmd_iterm_install()
+    elif args[0] == "to-codex" and len(args) > 1:
+        flagv = lambda n: (args[args.index(n) + 1] if n in args and args.index(n) + 1 < len(args) else None)
+        cmd_to_codex(args[1], brief=flagv("--brief"), task=flagv("--task"), spawn="--spawn" in args)
     else:
         sys.exit(USAGE.replace("{VERSION}", VERSION))
 
